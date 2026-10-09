@@ -1,0 +1,25 @@
+\section{Cross-Task Discussion}
+\label{sec:discussion}
+
+\noindent\textbf{Development estimates and official scores disagreed, in both
+directions.} Task~1's pooled out-of-fold F1 of 0.9465 became 0.9577 officially and
+Task~3's cross-validated accuracy of 0.8389 became 0.8746, while Task~2's dev accuracy
+of 0.861 became 0.7818, outside the spread of its own dev cases. In Tasks~2 and~3 official recall equals accuracy, so the
+metric is support-weighted, and our macro-averaged concerns (Task~2) and macro-F1
+objective (Task~3's rule, neutral on accuracy) did not transfer.
+
+\noindent\textbf{Secondary diagnostics show where the headline metric is bounded.} The
+Task~1 recall ceiling (0.9801) lies 0.0336 above the out-of-fold F1 (Exps.~A8, A15);
+Task~2's per-class and per-element breakdowns exposed the missing \texttt{N/A} class
+and the weak traceability element (Exps.~B12, B13); and one inseparable class pair caps
+Task~3's macro-F1 at 0.9364 (Exp.~C18).
+
+\noindent\textbf{Negative results need a bug hypothesis first.} Task~1's verifier
+looked like a dead end ($+0.0009$, Exp.~A10) until it was retrained on raw candidates
+and gained on all five folds (Exp.~A11), and fusion bugs had made TTA and ensembling
+look harmful (Exps.~A16, A17). Data structure is likewise an engineering problem and a
+leakage risk: fold-scoped synthesis (Task~1), a logical-case manifest (Task~2,
+Exp.~B1) and pseudo-call groups (Task~3, 1{,}107 groups against an estimated 400 calls,
+so grouped cross-validation may still leak).
+The practical lesson is to state next to every number which protocol produced it,
+and to treat the organisers' held-out scores as the only reliable estimate.

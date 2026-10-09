@@ -1,0 +1,388 @@
+\section{Task 2: Dataset, Full Experimental Log and Limitations}
+\label{app:t2}
+\renewcommand{\expprefix}{B}
+
+\subsection{Dataset and Data Irregularities}
+
+Table~\ref{tab:t2-dataset} summarises the dataset. An exploratory pass (Experiment~1) found: folder \texttt{RE-WA-2021-0077} actually contains \emph{two} complete establishments (Goldfields~\#35 and Midwest~\#100) both internally stamped with the same RE number, explaining the ``missing'' 100th case; folders \texttt{RE-QLD-2022-0077} and \texttt{RE-SA-2021-0066} are missing Track~1 (registration form); 267 explicit \texttt{[DEFICIENCY -- NOT DOCUMENTED]} markers, concentrated in Tracks~2 and~6; subtler planted failures (records kept in Mandarin, violating English-records CPs; a ``migration in progress'' status where ``2-year retention verified'' was expected; worn door-seal gaps; single-operator dispatch checks); a Registered Commodity field randomized per document ($\sim$5.6 distinct values/case, generation noise rather than signal); and uppercase headings corrupted by a state-code find/replace bug (e.g.\ \texttt{PHYTOSANITARY} $\to$ \texttt{PHYTOQLDNITARY}, a generation artifact rather than a traceability failure).
+
+\begin{table}[h]
+\caption{Task 2 dataset statistics.}
+\label{tab:t2-dataset}
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{5pt}
+
+\begin{tabularx}{\textwidth}{|
+    >{\raggedright\arraybackslash}p{0.30\textwidth}|
+    >{\raggedright\arraybackslash}X|}
+\hline
+\textbf{Quantity} & \textbf{Value} \\
+\hline
+Raw folders / logical cases (after manifest fix)
+& 99 / 100 \\
+\hline
+
+Files per case
+& 9 tracks (7 \texttt{.docx} + 2 \texttt{.xlsx}) \\
+\hline
+
+Checking points
+& 41 total: Element-1 (7), Element-2 (9),
+Element-3 (12), Element-4 (13) \\
+\hline
+
+Policy document
+& 132 pages, 184 sections, $\sim$266K characters \\
+\hline
+
+Labels
+& None provided; 10-case self-labelled development set;
+labels not independently verified \\
+\hline
+
+Median case size
+& $\sim$8.2K words / 22--26K tokens
+(fits in one context window) \\
+\hline
+\end{tabularx}
+\end{table}
+
+
+\subsection{Organisation of the Log}
+
+Fourteen numbered experiments were run; we group them by theme below. Within this appendix, ``Experiment~$n$'' refers to Experiment~B$n$.
+
+\subsection{Exploratory data analysis and evidence engineering}
+\label{sec:t2-eda}
+
+\begin{explog}{1}{Exploratory data analysis of the 99 raw case folders}
+\item[Hypothesis] The provided 99 folders correspond cleanly to 99 establishments with 9 consistent files each; before building any pipeline, this assumption should be checked for structural irregularities that could silently corrupt labels or ingestion.
+\item[Method] Enumerate every folder, count files per folder, diff file-naming patterns, spot-check document contents for internal consistency (e.g.\ RE number stamped inside each document versus the folder name).
+\item[Result] Found that folder \texttt{RE-WA-2021-0077} actually contains two separate, fully documented establishments (Goldfields~\#35 and Midwest~\#100), both stamped internally with the same RE number, explaining why 99 folders needed to become 100 logical cases. Also found two folders missing Track~1, 267 explicit deficiency markers, and template-noise fields (randomized commodity field, a state-code find/replace bug corrupting headings).
+\item[Inference] A naive per-folder pipeline would have silently produced only 99 rows, misattributed the doubled establishment's evidence to one RE number, and flagged generation artifacts as real traceability failures. The manifest layer and doubled-folder split are load-bearing, not optional cleanup.
+\end{explog}
+\begin{explog}{2}{Canonical logical-case manifest and evidence ETL design}
+\item[Hypothesis] A deterministic manifest layer that sits between the raw folders and the pipeline (rather than the pipeline touching raw folders directly) will make ingestion irregularity-proof and let the final row-shape (99 vs.\ 100 rows) be decided independently of ingestion logic.
+\item[Method] Define a canonical case model (case\_id, folder\_path, establishment name as identity anchor, farm\_number, 9-track file map, irregularity flags). Ingest by sorted directory listing, mapping files to tracks by leading numeral, never asserting exactly 9 files present. Produce two candidate submission variants: Variant~A (99 rows, doubled folder counted once) and Variant~B (100 rows, doubled folder split with a provisional second ID).
+\item[Result] A case manifest and a logical-case list were produced; the ETL converts \texttt{.docx}/\texttt{.xlsx} per case into track-tagged markdown, preserving table structure (xlsx register rows carry decisive signals) and tolerating missing tracks.
+\item[Inference] Keeping compliance logic entirely out of the ETL layer (pure text/table extraction, no thresholds or rules) is what satisfies the competition's ``no hard-coded compliance logic'' constraint at the data layer, in addition to the prompt layer.
+\item[Verdict] Kept; became Phase~2 (Deterministic Evidence ETL) of the final architecture.
+\end{explog}
+
+
+\subsection{Grounding: the Open Knowledge Format}
+
+\begin{explog}{3}{Open Knowledge Format (OKF) construction --- CP-to-section grounding}
+\item[Hypothesis] To satisfy the ``no hard-coded compliance logic'' rule while still giving the model focused legislative context, each of the 41 checking points should be mapped to the specific policy sections that actually state the obligation (not just title-matching sections), and this mapping should be produced by an LLM reading the real legislative text rather than authored by hand.
+\item[Method] Chunk the 132-page policy PDF into 184 section files via a deterministic regex on section headers (PyMuPDF). Run a one-time LLM pass that reads the policy text and maps each of the 41 CPs to its governing section(s), producing a YAML-cited bundle. Deduplicate repeated citations.
+\item[Result] 64 citation instances deduplicated to 18 unique governing sections ($3.56\times$ reduction). The bundle is stored with the system and can be re-derived on demand.
+\item[Inference] Because the mapping is machine-derived from the actual statute text rather than hand-authored rules, it satisfies the no-hard-coding constraint while keeping prompts short (18 sections instead of the full 184-section, $\sim$266K-character document). The mapping is, however, model-dependent: only 12 of 41 CPs matched across two different mapping models, so the reproducibility contract is ``same model + prompt $\to$ same mapping,'' not a universal ground truth.
+\item[Verdict] Kept; became Phase~1 (OKF) of the final architecture.
+\end{explog}
+
+
+\subsection{Model and architecture selection}
+
+\begin{explog}{4}{Model bake-off across four frontier models}
+\item[Hypothesis] Given identical prompts, OKF grounding, and full evidence, model choice (not architecture) will be the dominant factor in accuracy, and a reproducible, own-API-key-accessible model should be identified that comes closest to the best available model.
+\item[Method] Run identical full-context prompts + OKF + evidence for 10 dev cases across four models: Nemotron Ultra 550B, DeepSeek~V4~Pro, Gemini~3.5~Flash, and Sonnet~5 (Claude).
+\item[Result] Nemotron Ultra: $314/410 = 76.6\%$ (441K tokens, $\sim$170s/case). DeepSeek~V4~Pro: $334/410 = 81.5\%$ (300K tokens, $\sim$40s/case). Gemini~3.5~Flash: $353/410 = 86.1\%$ (442K tokens, $\sim$90s/case), with a $+16$pp Element-4 edge over Nemotron. Sonnet~5: $373/410 = 91.0\%$ ($\sim$710K tokens, $\sim$240s/case) --- highest accuracy but withdrawn from use.
+\item[Inference] Gemini~3.5~Flash was selected as the best model that was both reproducible via the team's own API key and cost/speed-competitive, even though Sonnet~5 scored 4.9pp higher; Sonnet's exclusion is a reproducibility/access constraint, not a quality judgement. Sonnet~5 was used in this development bake-off and in the CP-level analysis of Experiments~9 and~10; the submitted system uses only Gemini~3.5~Flash.
+\item[Verdict] Kept --- Gemini~3.5~Flash selected as the production model.
+\end{explog}
+
+
+\begin{explog}{5}{Model tier vs.\ ensemble size (persona ensemble ablation)}
+\item[Hypothesis] A 3-persona ensemble (Standard / Adversarial / Step-by-step, majority-vote arbitration) using a smaller/cheaper base model can match a single strong-model pass, since ensembling is a standard way to compensate for a weaker base model.
+\item[Method] Run the 3-persona majority-vote ensemble with Haiku as the base model on a case; compare against a single Sonnet pass on the same case.
+\item[Result] Haiku ensemble: $70.7\%$ on that case. Single Sonnet pass: $92.7\%$ on the same case, at less token cost (70K vs.\ 163K).
+\item[Inference] On this case, the weak-model ensemble lost to a single strong-model pass ($70.7\%$ against $92.7\%$) while using more tokens. Model tier and ensembling are confounded here (Haiku ensemble against single Sonnet), so this suggests, but does not show, that majority voting cannot recover evidence that the individual personas never read.
+\item[Verdict] Dropped the persona ensemble in favor of a single strong full-context pass; whether ensembling would help with a competent base model was noted as an open question but not re-tested.
+\end{explog}
+
+
+\subsection{Retrieval versus full context}
+
+\begin{explog}{6}{Full-context vs.\ Hybrid RAG}
+\item[Hypothesis] Retrieval-augmented generation~\cite{lewis2020rag}, feeding the model only the most relevant evidence chunks per CP via BM25~\cite{robertson2009bm25}~+~dense retrieval fusion~+~ColBERT~\cite{khattab2020colbert} late-interaction rerank, should reduce token cost relative to full-context while preserving or improving accuracy.
+\item[Method] Build a complete hybrid-RAG branch (BM25 lexical~+~bge-small dense retrieval~\cite{xiao2024bge}, weighted fusion, ColBERT rerank, then LLM) and compare its 10-case accuracy and token cost against the full-context Gemini pipeline.
+\item[Result] Full-context (Gemini): $86.1\%$ accuracy, 442K tokens. Hybrid RAG (best configuration, dense weight $\alpha=1.0$): $74.9\%$ accuracy, 610K tokens --- worse on both axes.
+\item[Inference] When the full evidence already fits in one context window (median case $\sim$22--26K tokens), retrieval only adds missed-signal risk and per-call overhead rather than saving cost. A concrete failure mode was measured: the decisive ``maintained in Mandarin'' sentence was retrievable only $\sim$56\% of the time under the RAG pipeline (a sentence-level rate; this is a different quantity from the track-level hit@5 of Experiment~7, which only asks whether the right evidence file is among the top five).
+\item[Verdict] Dropped hybrid RAG entirely in favor of full-context; reported as a high-value negative result since it overturned the initial retrieval-first design.
+% TODO: confirm how the 56% was computed} 
+\end{explog}
+
+
+\begin{explog}{7}{Hybrid fusion-weight grid search (retrieval-quality-only, no LLM cost)}
+\item[Hypothesis] Since RAG was already shown to underperform full-context, but the team still wanted to characterize retrieval quality in isolation: a moderate-to-BM25-heavy fusion weight was expected to perform best, matching the common prior that lexical retrieval anchors legal/structured text well.
+\item[Method] Sweep the dense-retrieval fusion weight $\alpha \in \{0.0, 0.25, 0.5, 0.75, 1.0\}$ against two embedding models (bge-small, bge-base)~\cite{xiao2024bge}, measuring track-hit@5 against gold, with no LLM call involved.
+\item[Result] bge-small track-hit@5 by $\alpha$: $0.515$ ($\alpha=0$, BM25-only) $\to 0.558 \to 0.645 \to 0.759 \to 0.808$ ($\alpha=1.0$, dense-only). bge-base track-hit@5 at $\alpha=1.0$ was $0.726$, worse than bge-small's $0.808$ at the same setting.
+\item[Inference] Pure dense retrieval ($\alpha=1.0$) was optimal, inverting the prior that a higher BM25 weight would be better. At $\alpha=1.0$ the larger embedding model (bge-base, $0.726$) underperformed the smaller one (bge-small, $0.808$); Table~\ref{tab:t2-fusion} gives the sweep.
+\item[Verdict] Recorded as a negative/inverted-prior finding; not used in production since full-context replaced RAG entirely.
+\end{explog}
+
+
+\subsection{Prompt and call-architecture engineering}
+
+\subsubsection{Proposed separation of system and user prompts}
+\label{sec:t2-system-prompt}
+
+\paragraph{Status.}
+The submitted production run did not use a separate system prompt: the instructions
+were included in the user message together with the case context. The following
+system/user separation is documented as a proposed prompt-architecture revision,
+not as a configuration used to generate \texttt{submission\_100.csv}. Any accuracy
+or robustness benefit remains unmeasured unless the revised configuration is
+evaluated experimentally.
+
+\paragraph{Rationale.}
+The proposed change separates stable auditor behaviour and output constraints from
+case-specific input. The system prompt contains the auditor role, verdict semantics,
+evidence-grounding rules, noise-resistance guidance, confidence requirements, and
+JSON output contract. The user prompt supplies the rendered context and checking
+points. This separation is intended to improve maintainability without adding
+CP-specific compliance criteria or hard-coded verdict logic.
+
+\paragraph{Proposed system prompt.}
+The proposed contents of \texttt{prompts/system\_auditor.md} are reproduced below.
+
+\begin{quote}
+\small
+\textbf{System Role: Evidence-Grounded Compliance Auditor.}
+
+You are a compliance auditor evaluating farm export-compliance cases against the
+\emph{Export Control (Plants and Plant Products) Rules 2021}. Assess each checking
+point (CP) strictly against the governing policy text and case evidence supplied
+in the user message. Do not introduce requirements, thresholds, exceptions, or
+compliance criteria unsupported by the supplied text.
+
+\medskip
+\textbf{Verdict semantics.}
+Assign exactly one verdict to each CP:
+\texttt{1} means the evidence establishes that the obligation is met;
+\texttt{0} means the evidence establishes that it is not met; and
+\texttt{N/A} is permitted only when the evidence gives an explicit, documented
+reason why the obligation does not apply. Silence or lack of discussion alone
+does not justify \texttt{N/A}.
+
+\medskip
+\textbf{Evidence-grounded reasoning.}
+Identify the precise obligation in the supplied policy text, examine all relevant
+case evidence including narrative text, tables, registers, status notes, and
+verification fields, and connect the decisive fact to the obligation. Do not
+invent evidence or infer a violation from suspicion alone. Do not overlook a
+deficiency merely because it appears in a dense table or an inconspicuous sentence.
+
+\medskip
+\textbf{Evidence integrity and noise resistance.}
+Treat the establishment name and RE number in the case header as the authoritative
+identity anchors. Per-track registered-commodity fields and identity fields inside
+individual tracks may be independently generated template fields; do not treat
+mismatches as compliance failures unless the governing policy makes them relevant.
+Distinguish repeated boilerplate from case-specific evidence. Where a register
+contains a fixed target and a case-specific status or verification note, assess
+the complete row in context rather than treating the target as proof that the
+requirement has been met.
+
+\medskip
+\textbf{Grounding and scope.}
+Use only the supplied policy text and case evidence. Do not invent legal citations,
+import outside requirements, or assume that a topically related section governs
+a CP. If the evidence does not resolve a factual question, state the limitation
+rather than manufacturing certainty. Do not introduce CP-specific verdict rules,
+fixed thresholds, or assumptions about expected labels.
+
+\medskip
+\textbf{Reasoning and confidence.}
+For each CP, provide two to three concise sentences naming the governing
+requirement and the decisive case fact. Assign a confidence score from 0.0 to 1.0
+that reflects the strength and clarity of the evidence. Include a short, verbatim
+excerpt from the case evidence; do not fabricate quotations or present paraphrases
+as direct quotations.
+
+\medskip
+\textbf{Output contract.}
+Return one JSON object per CP in a single JSON array. Each object must contain
+exactly \texttt{cp}, \texttt{reasoning}, \texttt{verdict}, \texttt{confidence},
+and \texttt{cited\_evidence}. Include every requested CP exactly once. Return only
+valid JSON, without Markdown fences, introductory prose, trailing explanations,
+or additional fields.
+\end{quote}
+
+\paragraph{Proposed user prompt.}
+The dynamic user message is reduced to the following template; the existing
+placeholder construction remains unchanged.
+
+\begin{verbatim}
+# Compliance Audit Task
+
+## Context
+
+{CONTEXT_BLOCK}
+
+## Task
+
+Assess {CP_SCOPE_TEXT} against the supplied governing policy text and case evidence.
+For each checking point, follow the system instructions and return the required
+structured JSON verdict.
+
+## Output
+
+Return a JSON array containing one entry per checking point in scope.
+\end{verbatim}
+
+\paragraph{Implementation note.}
+This separation should be treated as a new experimental condition. To attribute
+any performance change to the system prompt, compare it against the existing
+single-user-message baseline using the same model snapshot, temperature, evidence,
+OKF bundle, and evaluation cases. Report results separately and do not describe
+the proposed prompt as part of the submitted run unless the production pipeline is
+rerun with this configuration.
+
+
+\begin{explog}{8}{Token/cost engineering across prompt architecture versions (v1 $\to$ v2 $\to$ v3)}
+\item[Hypothesis] Prompt/call architecture (how many LLM calls per case, and how evidence is chunked into those calls) can be iteratively simplified without losing accuracy, and simpler is likely both cheaper and more robust.
+\item[Method] v1: per-element, per-persona calls (13 calls/case, $\sim$1.16M characters of combined prompt). v2: whole-case, 3-persona ensemble (3 calls/case, $\sim$215K tokens). v3: single full-context call (1 call/case, $\sim$44K tokens).
+\item[Result] v1 was unworkable due to megabyte-scale prompts. v2 surfaced a bug in which the majority-vote threshold was hard-coded at $\geq 2$, creating a hard-coded-logic risk and adding complexity. We did not measure a strong-model ensemble against a single strong pass (Experiment~5 compares different model tiers), so its accuracy benefit is untested. v3 (single full-context) became final: 1 call/case, $\sim$44K tokens.
+\item[Inference] Architecture simplification tracked directly with the ensemble-vs-single-model finding (Experiment~5): once a capable model reads the full case in one pass, multi-call/multi-persona architectures add cost and failure surface; whether they add accuracy with a strong base model was not tested.
+\item[Verdict] Kept v3 (single full-context call) as final architecture.
+\end{explog}
+
+
+\begin{explog}{9}{Prompt engineering fix for CP38 (record retention) --- boilerplate-vs-signal discipline}
+\item[Hypothesis] CP38 was being scored incorrectly because the model was anchoring on a boilerplate date-range string that is byte-identical across compliant and non-compliant cases, rather than on the actual per-case status note that indicates the real verdict.
+\item[Method] Diagnose failure cases: the model first always called CP38 compliant (reading only the date text), then, after a ``do date arithmetic'' prompt fix, always called it non-compliant (same accuracy, different wrong cases). Rewrote the prompt to explicitly instruct the model that the status/verification note (``2-year retention verified'' vs.\ ``migration in progress'') is the real signal, not the surrounding boilerplate date text. The exact added wording was: ``Where a row has both a fixed target (e.g.\ `target >= 2 years') and a case-specific status/verification note (e.g.\ `verified' vs `migration in progress' / `pending'), the status note is the signal --- the target text next to it is the same in every case and is not.''
+\item[Result] CP38 accuracy on the 10-case dev set went from $4/10$ to $10/10$, which is $+6$ cells or $+1.5$\,pp of the 410 judgments. Aggregate dev accuracy rose from $89.0\%$ ($365/410$) to $91.0\%$ ($373/410$), i.e.\ $+8$ cells, so two further cells, which we did not identify, also changed with the prompt rewrite. All of this was measured on the Sonnet dev run, whereas the submitted model is Gemini~3.5~Flash; we did not record whether the Gemini figure of $86.1\%$ (Experiment~4) was measured before or after the CP38 fix. The CP38 fix was developed on the dev set it is scored on.
+\item[Inference] This generalized into a documented evidence-handling discipline in the production persona prompt: distinguish fixed boilerplate that repeats across compliant and non-compliant cases from the actual per-case status signal. We distinguish encoding a CP's \emph{requirement} (what the governing text obliges) from hard-coding its \emph{expected answer} (instructing which verdict to emit for a specific evidence string). The added sentence is a general interpretation rule in structure, but its examples name the exact status strings that separate compliant from non-compliant rows, i.e.\ they are answer-specific to CP38; the no-hard-coding constraint is therefore only partially satisfied. The fix was evaluated only on the dev set it was tuned on, never on unseen cases. The same class of fix was identified as still needed, but not completed, for CP37.
+\item[Verdict] Kept; folded into the persona prompt's three core evidence-handling disciplines.
+\end{explog}
+
+
+\subsection{Validation and error analysis}
+
+\begin{explog}{10}{Per-CP error analysis on the Sonnet dev run (diagnostic pass)}
+\item[Hypothesis] Reviewing per-CP accuracy on the dev set (rather than only the aggregate) will surface both model failure modes and, potentially, defects in the hand-built gold labels themselves.
+\item[Method] Sort all 41 CPs by dev-set accuracy and manually review the worst-performing CPs' evidence and gold labels.
+\item[Result] CP37 ($50\%$): the model inconsistently flags a byte-identical boilerplate sentence as a deficiency where gold is unanimously compliant across all 10 cases --- unfixed. CP39 ($50\%$): gold itself is internally inconsistent --- 4 cases share byte-identical evidence text but were labeled 1, 0, 0, 0 by the hand-labeler; the model's own calls were judged more internally consistent than gold on this CP. CP35, CP36, CP2, CP40, CP1, CP6, CP7 and several 9/10 CPs were flagged as not yet root-caused. 32 of 41 CPs were at or above $90\%$ accuracy, and 25 at $100\%$ (16 CPs have at least one error).
+\item[Inference] Not every apparent model error is a model error --- CP39's low score reflects a gold-label defect rather than a reasoning failure, which matters for interpreting the ceiling on achievable accuracy given the dev set's own label noise (the dev labels were not independently verified).
+\item[Verdict] CP37 fix identified as future work but not completed.
+\end{explog}
+
+
+\begin{explog}{11}{Per-case variability on the 10-case dev set}
+\item[Hypothesis] Dev accuracy should be reasonably stable across individual cases, rather than driven by one or two easy or hard cases.
+\item[Method] Compute accuracy for each of the 10 dev cases from the fixed Gemini~3.5~Flash predictions. Nothing is trained or held out in this analysis.
+\item[Result] Mean $86.1\%$, standard deviation $4.3$ points across cases (not a confidence interval; for $n=10$ the 95\% interval of the mean is about $\pm3.1$ points); minimum case $80.5\%$, maximum $95.1\%$.
+\item[Inference] The official accuracy ($78.18\%$) is below the worst dev case, so the official gap is not sampling noise within this dev set. Dev accuracy is not held-out accuracy: the CP38 part of the prompt was tuned on these cases (Experiment~9), the labels were self-assigned and not independently verified, and CP39's gold is internally inconsistent (Experiment~10). We therefore do not use $86.1\%$ as a headline number.
+\item[Verdict] Retained as a description of per-case spread on the dev set, not as a validation estimate.
+\end{explog}
+
+
+\begin{explog}{12}{Per-class metric analysis and the macro-vs-micro accuracy discovery}
+\item[Hypothesis] Because the competition's scoring definition might use macro-averaged (per-class mean) accuracy rather than micro (overall) accuracy, per-class precision/recall/F should be computed explicitly to check whether the two scoring conventions would diverge materially.
+\item[Method] Compute per-class precision, recall, F1, and per-class accuracy for the three verdict classes (1/compliant, 0/non-compliant, N/A) on the 10-case dev set using Gemini~3.5~Flash's predictions.
+\item[Result] Class~1 ($n=330$): precision $0.939$, recall $0.885$, F $0.911$. Class~0 ($n=72$): precision $0.616$, recall $0.847$, F $0.714$. Class~N/A ($n=8$): precision $0.000$, recall $0.000$, F $0.000$ --- the model never emitted \texttt{N/A} at all, and all 8 gold-N/A cells (from the two Track-1-missing cases, on CP1/2/6/7) were predicted as~1. Micro-accuracy $86.1\%$, macro-F $0.54$, macro-recall $0.58$ ($(0.885+0.847+0)/3$).
+\item[Inference] On the dev set the model never predicts \texttt{N/A}, so a macro-averaged metric would give $0.58$ against $0.86$ micro. The official scores later showed that recall equals accuracy (Section~\ref{sec:t2-results}), i.e.\ support-weighted averaging, so this concern did not materialise; we keep the analysis because it documents the \texttt{N/A} behaviour. The all-1 prediction on the two Track-1-missing cases is also an avoidable limitation: the ETL knows which track is missing, so a prompt rule ``if the track is absent, answer \texttt{N/A}'' would not be compliance logic (it concerns input availability). We did not apply it; at most 8 of 4{,}100 production cells (two cases $\times$ four CPs) are affected.
+\item[Verdict] Reduced to a limitation after the official results; the \texttt{N/A} behaviour is avoidable and was not fixed.
+% TODO (optional): run that prompt rule on the two affected cases}
+\end{explog}
+
+
+\begin{explog}{13}{Per-element accuracy breakdown (Gemini 3.5 Flash, dev set)}
+\item[Hypothesis] Accuracy likely varies by compliance element (registration, facilities, hygiene, traceability), since these differ in how much they depend on dense tabular evidence versus narrative text.
+\item[Method] Compute accuracy per element (Element-1 through Element-4) on the 10-case dev set.
+\item[Result] Element-1 (registration/plans): $85.7\%$. Element-2 (buildings/facilities): $98.9\%$. Element-3 (hygiene/waste/pest): $85.8\%$. Element-4 (traceability/phytosanitary): $77.7\%$, the weakest element.
+\item[Inference] Element-4 (traceability), which depends most heavily on cross-referencing xlsx register rows and identifying subtle status-note signals (similar to the CP38/CP39 pattern), is the hardest element and the most likely source of remaining error in a production run.
+\item[Verdict] Documented as a known weak point, not separately re-engineered before the production run.
+\end{explog}
+
+
+\subsection{Production run}
+
+\begin{explog}{14}{Production run across all 100 logical cases}
+\item[Hypothesis] The finalized single-call, full-context, Gemini~3.5~Flash pipeline, hardened with per-case checkpointing and a per-call timeout, will complete the full 100-case corpus reliably despite API rate limits and credit constraints encountered during earlier long runs.
+\item[Method] Run the final pipeline (Phase~1 OKF + Phase~2 ETL output + Phase~3 single full-context LLM call + Phase~4 formatting) across all 100 logical cases, with a 240-second per-call timeout and per-case checkpointing enabling resumption without lost progress.
+\item[Result] 100/100 cases completed, 0 blanks, 0 parse failures after hardening. Total cost 4{,}493{,}869 tokens ($\sim$44.9K/case). Output distribution: 3{,}118 $\times$ `1', 982 $\times$ `0' ($23.95\%$, against $17.6\%$ in the dev gold), 0 $\times$ `N/A'. Class-0 precision on the dev set was only $0.616$, so over-flagging is a possible contributor to the gap between dev and official accuracy; without test labels we cannot confirm it. The run was resumed 4 times across mid-run key changes and credit/rate-limit stops, with zero lost progress due to per-case checkpointing.
+\item[Inference] The 100th case was submitted under a provisional ID. The N/A-avoidance behavior observed on the 10-case dev set (Experiment~12) persisted at full scale --- zero N/A outputs across all 4{,}100 CP judgments in production, confirming this is a systematic model behavior rather than a small-sample artifact.
+\item[Verdict] Kept as final production run; the submission file was produced from this run.
+\end{explog}
+
+
+
+\subsection{Scorer Denominator}
+
+The official accuracy needs a denominator check: $0.7818\times4100$ is not an integer
+(3205 correct cells give $0.7817$, 3206 give $0.7820$), and 99 rows ($4059$ cells) does
+not give it either, so the scorer must exclude some cells or rows.
+
+\subsection{Additional Tables}
+
+\begin{table}[h]
+\caption{Task 2 model bake-off (10-case dev set, identical prompt and OKF grounding). Sonnet 5 was used for development only.}\label{tab:t2-bakeoff}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Model & Accuracy & Tokens & Time/case \\
+\midrule
+Nemotron Ultra 550B & 76.6\% (314/410) & 441K & $\sim$170s \\
+DeepSeek V4 Pro & 81.5\% (334/410) & 300K & $\sim$40s \\
+\textbf{Gemini 3.5 Flash (selected)} & \textbf{86.1\% (353/410)} & \textbf{442K} & \textbf{$\sim$90s} \\
+Sonnet 5 (withdrawn: reproducibility) & 91.0\% (373/410) & $\sim$710K & $\sim$240s \\
+\midrule
+Hybrid RAG, best configuration (Exp.~B6) & 74.9\% & 610K & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:t2-bakeoff} gives the model bake-off of Experiments~4 and~6,
+Table~\ref{tab:t2-perclass} the per-class breakdown of Experiment~12 and
+Table~\ref{tab:t2-fusion} the retrieval sweep of Experiment~7.
+
+\begin{table}
+\caption{Task 2 per-class metrics on the 10-case dev set (Gemini 3.5 Flash).}\label{tab:t2-perclass}
+\centering
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+Class & $n$ & Precision & Recall & F1 \\
+\hline
+1 (compliant) & 330 & 0.939 & 0.885 & 0.911 \\
+0 (non-compliant) & 72 & 0.616 & 0.847 & 0.714 \\
+N/A & 8 & 0.000 & 0.000 & 0.000 \\
+\hline
+\multicolumn{5}{|l|}{Micro-accuracy: 0.861 \quad Macro-F1: 0.54 \quad Macro-recall: 0.58} \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\caption{Hybrid fusion-weight sweep (Experiment~7): track-hit@5 against gold for
+dense-retrieval weight $\alpha$ ($\alpha=0$ is BM25 only, $\alpha=1$ dense only). Only
+the $\alpha=1.0$ point was reported for bge-base.}
+\label{tab:t2-fusion}
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+Embedding model & $\alpha=0.0$ & $0.25$ & $0.5$ & $0.75$ & $1.0$ \\
+\midrule
+bge-small & 0.515 & 0.558 & 0.645 & 0.759 & \textbf{0.808} \\
+bge-base & --- & --- & --- & --- & 0.726 \\
+\bottomrule
+\end{tabular}
+\end{table}
+% TODO: add the bge-base track-hit@5 values for alpha < 1.0 from the logs, or keep the dashes
+
+\subsection{Limitations}
+\label{sec:t2-limits}
+
+\begin{itemize}
+\item \textbf{Dev set.} Ten self-labelled cases with unverified labels; prompts, including the CP38 part, were tuned on them, so dev accuracy is not held-out accuracy.
+\item \textbf{Model mismatch in the analysis.} The CP37/38/39 analysis was run on the Sonnet~5 run, while the submitted model is Gemini~3.5~Flash.
+\item \textbf{No OKF ablation.} We did not compare with and without OKF, or OKF against the full 184-section policy, and only 12 of 41 CPs were mapped identically by two mapping models.
+\item \textbf{Ensembling untested for strong models.} Experiment~5 confounds model tier and ensembling.
+\item \textbf{Determinism.} Temperature~0 does not guarantee identical outputs, and the exact model snapshot is not recorded.
+\item \textbf{CP-specific prompt text.} The CP38 wording is a general interpretation rule whose examples name the exact CP38 status strings (``2-year retention verified'' vs.\ ``migration in progress''), so it is answer-specific and sits in tension with the no-hard-coding constraint; it was never evaluated on unseen cases, so the constraint is not fully demonstrated.
+\end{itemize}

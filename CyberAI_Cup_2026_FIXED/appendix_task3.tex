@@ -1,0 +1,761 @@
+\section{Task 3: Dataset, Full Experimental Log and Limitations}
+\label{app:t3}
+\renewcommand{\expprefix}{C}
+
+\subsection{Dataset}
+
+Table~\ref{tab:t3-data} summarises the data.
+
+\begin{table}[h]
+\caption{Task 3 dataset statistics.}
+\label{tab:t3-data}
+\centering
+\begin{tabular}{ll}
+\hline
+Quantity & Value \\
+\hline
+Training / test flows & 1{,}285 / 327 \\
+Classes & 10 (5 applications $\times$ voice/video) \\
+Class sizes & 40 (GoogleMeet\_voice) to 256 (Discord\_video) \\
+Raw fields per flow & 5 packet lengths, 5 relative timestamps \\
+Packet lengths & 26--1{,}242 bytes \\
+Five-packet time span & 48\,$\mu$s to 23.21\,s (median 571\,$\mu$s) \\
+Source calls (training) & $\approx$400 (estimated, see Exp.~2; identifiers not released) \\
+Train/test adversarial-validation AUC & 0.529 (exchangeable) \\
+Constant-size flows & 125 (Discord: 58 voice, 37 video) \\
+Audio-only windows (all five packets $<300$\,B) & 726 flows (56.5\%) \\
+Zoom audio-only windows & 160 (80 voice, 80 video) \\
+Official metrics & accuracy, precision, recall, F$_\beta$ (weighted) \\
+Development metric & macro-F1 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Organisation of the Log}
+
+Twenty-five numbered experiments were run in a logical sequence; we group them
+by theme. Within this appendix, ``Experiment~$n$'' refers to Experiment~C$n$. Unless noted, scores for Branch~B are grouped cross-validation scores
+(Experiment~2). Branch~A was developed earlier, under stratified 5-fold
+cross-validation with nested tuning, and its numbers are labelled accordingly
+(see Section~\ref{sec:t3-limits}). Metrics are accuracy, macro-F1 and, for
+Branch~A, macro-recall.
+
+\subsection{Data and validation protocol}
+
+ 
+\begin{explog}{1}{Exploratory analysis of the flow records}
+\item[Hypothesis] Before any modelling, structural properties of the 5-packet records
+(duplicates, train/test shift, label determinism, protocol markers) decide how
+much is learnable and how evaluation must be built.
+\item[Method] Integrity checks; per-column Kolmogorov--Smirnov tests and adversarial
+validation (a RandomForest separating train rows from test rows); per-class
+packet-length and inter-arrival analysis against protocol reference bands;
+mutual information and ANOVA-$F$ per engineered feature; embeddings coloured
+separately by application and by call mode; flat versus factorised
+(application $\times$ mode) classifiers.
+\item[Result] 1{,}285 training and 327 test flows, no missing values,
+\texttt{relative\_time\_0} identically zero. Adversarial-validation AUC 0.529.
+Only 2 of 1{,}136 distinct length tuples map to more than one class, but they
+cover 95 rows (7.4\%). Packets in the 1100--1600\,B band make up 10.7\% of
+video-class packets and 0.0\% of voice-class packets. Factorised, the
+application is recoverable at 0.912 and the call mode only at 0.888. Flows per
+call extrapolated to 100 held-out calls predict $\approx$321 test flows against
+327 supplied.
+\item[Inference] Train and test are exchangeable, so cross-validation is a meaningful
+proxy. Call mode, not application, is the harder factor. Because most length
+tuples are unique, tuple-to-label determinism says little about held-out rows
+until it is tested on them (Experiment~13).
+\item[Verdict] Kept as the standing diagnostic; motivated the feature bands and the
+validation design.
+\end{explog}
+
+\begin{explog}{2}{Plain versus grouped validation, and negative controls}
+\item[Hypothesis] The 1{,}285 training flows come from an estimated 400 source calls and no call
+identifier is released, so near-identical sibling flows will straddle the
+train/validation boundary under ordinary stratified folds and may inflate scores.
+If folds and cached features are leak-free, shuffled labels must score near
+chance and a prior-only predictor must match the majority share.
+\item[Method] Two schemes were run side by side for every Branch~B model: \emph{plain}
+(repeated stratified 5-fold, 3 repeats) and \emph{grouped}
+(\texttt{StratifiedGroupKFold}, 5 splits, 2 shuffled repeats $=10$ folds) over a
+pseudo-group key equal to the packet-length tuple rounded to 8-byte granularity
+joined with $\mathrm{round}(\log_{10}\mathrm{duration},1)$. Fold indices were
+stored. Controls: N1, grouped CV with permuted labels; N2, prior-only predictor.
+\item[Result] The key yields 1{,}107 pseudo-groups; 253 flows (20\%) share a group with
+at least one other flow. Plain and grouped scores of matched runs differ by up
+to about two points, and not always in the same direction (e.g.\ Experiments~10
+and~14). N1 scores 0.1549 (expected band 0.08--0.20); N2 scores 0.1992
+(expected 0.1992).
+\item[Inference] Sibling leakage is moderate at this data size but cannot be ruled out per
+model, so grouped scores are the ones every selection decision relies on. Folds
+and feature cache are leak-free. Two caveats. First, the pseudo-key is
+conservative in one direction only: 1{,}107 pseudo-groups against an estimated
+400 calls means the key splits some calls, so grouped CV may still leak siblings
+(Experiment~15 finds 1{,}024 singleton clusters). Second, for TabICL at full
+width the grouped score (0.8389) is \emph{higher} than the plain score (0.8195),
+the opposite of what sibling leakage predicts; we have not isolated the cause and
+treat the two protocols as differing by seed and fold structure as much as by
+leakage.
+\item[Verdict] Grouped CV adopted as the decisive estimate; both controls pass.
+\end{explog}
+
+\subsection{Baselines, model search and features}
+
+ 
+\begin{explog}{3}{Untuned baseline and large-scale model search}
+\item[Hypothesis] A broad search across model families finds a configuration that clearly
+outperforms an untuned gradient-boosted baseline.
+\item[Method] Untuned LightGBM on the engineered features (plain 5-fold) as control.
+Then 2{,}377 points scored (XGBoost 962, LightGBM 626, RandomForest 588, CatBoost
+61, ExtraTrees 36, SVM 27, MLP 23, $k$-NN 22, HistGradientBoosting 20, logistic
+regression 10, PacketFormer 2) in 83.6 container-hours, one container per grid
+point, then Optuna~\cite{optuna} (TPE, ask/tell batching) around the grid
+winners. Class weighting was itself a searched parameter. Grouped CV.
+\item[Result] Untuned LightGBM 0.810 accuracy (plain protocol, so not directly comparable
+with the grouped scores below). Optuna: LightGBM 180 trials $\rightarrow$ 0.8249,
+XGBoost 180 $\rightarrow$ 0.8202, RandomForest 150 $\rightarrow$ 0.8023; the
+CatBoost~\cite{catboost} study stopped when a single trial exceeded the 3{,}600\,s
+limit. Table~\ref{tab:t3-leader} gives the best point per family. The winning
+LightGBM point uses 800 trees, 31 leaves, learning rate 0.12, subsample 0.8,
+column sample 0.8, minimum child samples 10 and no class weighting.
+\item[Inference] Boosted trees lead; distance, kernel, linear and neural models trail by
+9--11 points. The untuned baseline was scored under the plain protocol and the searched points
+under grouped CV, so the gain attributable to the search is not isolated; the
+grouped-CV gap between the tuned LightGBM (0.8249) and the default-setting
+LightGBM of Experiments~4 and~17 (0.8152, 0.8156) is about one point.
+% TODO: run untuned LightGBM on the stored grouped folds and replace this sentence with the matched number
+\item[Verdict] LightGBM (0.8249 grouped, macro-F1 0.8069) kept as the control for all
+later Branch~B comparisons. The ``LightGBM control'' appears with four scores in
+this section (0.8249 here; 0.8152 in Experiment~4; 0.8210 in Experiment~14;
+0.8156 in Experiment~17) because they come from different configurations and
+repeat counts; Table~\ref{tab:t3-control} lists them.
+% TODO: fill the config column from the logs
+\end{explog}
+
+\begin{table}[t]
+\caption{Best point per family, grouped CV (Experiment~3).}
+\label{tab:t3-leader}
+\centering
+\begin{tabular}{rlcc}
+\hline
+Rank & Model & Grouped accuracy & Macro-F1 \\
+\hline
+1 & LightGBM & 0.8249 & 0.8069 \\
+2 & XGBoost & 0.8218 & 0.8067 \\
+3 & HistGradientBoosting & 0.8156 & 0.7959 \\
+4 & ExtraTrees & 0.8125 & 0.8009 \\
+5 & CatBoost & 0.8070 & 0.7895 \\
+6 & RandomForest & 0.8023 & 0.7866 \\
+7 & PacketFormer (pretrained) & 0.7346 & 0.7262 \\
+8 & PacketFormer (scratch) & 0.7331 & 0.7239 \\
+9 & MLP & 0.7292 & 0.6792 \\
+10 & SVM (RBF) & 0.7268 & 0.6595 \\
+11 & Logistic regression & 0.7144 & 0.6666 \\
+12 & $k$-NN & 0.7132 & 0.6747 \\
+-- & Majority class & 0.1992 & 0.0332 \\
+\hline
+\end{tabular}
+\end{table}
+
+ \begin{table}[t]
+\caption{The four LightGBM scores used as ``control'' in this section.}
+\label{tab:t3-control}
+\centering
+\begin{tabular}{llc}
+\hline
+Experiment & Configuration & Grouped accuracy \\
+\hline
+3 & Optuna best point, 241 columns & 0.8249 \\
+4 & matched full-width run, 241 columns & 0.8152 \\
+14 & best point used for calibration & 0.8210 \\
+17 & standing configuration, three repeats & 0.8156 \\
+\hline
+\end{tabular}
+\end{table}
+\begin{explog}{4}{Feature width and label-aware blocks}
+\item[Hypothesis] Pruning the 241 deterministic columns by mutual information should remove
+noise at 1{,}285 rows; class-conditional Markov, density and neighbourhood
+features computed inside the CV loop should add signal beyond the label-free
+blocks.
+\item[Method] Matched LightGBM and XGBoost runs on the full 241 columns, top-120 and
+top-60 columns, full repeat budget; then matched runs with the label-aware blocks
+switched on and off. % TODO: state whether the MI ranking was computed inside each fold
+\item[Result] LightGBM grouped accuracy 0.8152 (full), 0.8097 (top-120), 0.7895 (top-60);
+macro-F1 0.7974, 0.7918, 0.7706. XGBoost 0.8016 (full) against 0.7907 and 0.7911.
+Label-aware blocks: LightGBM 0.8152 $\rightarrow$ 0.7969, XGBoost 0.8016
+$\rightarrow$ 0.7883, at every width tested.
+\item[Inference] The full set beats both subsets in every matched pair, so pruning discards
+usable signal. At 1{,}285 rows the label-aware blocks contribute variance rather
+than signal (about 1.8 accuracy points on LightGBM) even after the inner
+out-of-fold fix.
+\item[Verdict] Full 241-column label-free set kept for Branch~B; label-aware blocks
+dropped.
+\end{explog}
+
+\begin{explog}{5}{Compact 31-feature set and two added features (Branch A)}
+\item[Hypothesis] Branch~A needs only a compact representation (raw lengths and times,
+differences, order statistics, shape descriptors); single features found by
+symbolic search or by inspecting misclassified Discord and Google Meet video flows
+may still add signal.
+\item[Method] 29 base columns (Stage~0 of Section~\ref{sec:t3-arch}) plus two features added one at a time:
+$\log$ of the fourth packet length (found by genetic-programming symbolic
+regression), and the position of the largest packet-to-packet size increase
+(separating an instant jump to a plateau from a gradual ramp, found by manual
+inspection of video misclassifications).
+% TODO: state the protocol and metric of the two gains (stratified 5-fold nested? macro-recall or macro-F1?)
+\item[Result] An isolated gain in the validated score of $+0.0017$ for the log feature and
+$+0.0014$ for the jump position. Total 31 features.
+\item[Inference] Small but individually reproducible gains; the jump position encodes the
+temporal shape that static order statistics miss.
+\item[Verdict] Both kept; Branch~A uses 31 features.
+\end{explog}
+
+\subsection{Branch A: tree ensemble}
+
+ 
+\begin{explog}{6}{Probability correction on the averaged ensemble}
+\item[Hypothesis] Averaged tree probabilities are over-confident and carry the training class
+prior; softening them with a temperature and dividing out the prior should help a
+macro-averaged criterion.
+\item[Method] Out-of-fold probabilities from the three models (Stage~1 settings) under
+stratified 5-fold (seed 42); equal-weight average; temperature $T$ on the
+log-probabilities; division by the empirical class prior; argmax. $T$ was fixed at
+2.0 after the temperature studies of this branch. % TODO: add the T sweep and the with/without-prior ablation as a small table
+\item[Result] Stage-0 macro-recall 0.8286.
+\item[Inference] Reference point for the decision layer of Experiment~7.
+\item[Verdict] Kept.
+\end{explog}
+
+\begin{explog}{7}{Per-class decision bias and margin-triggered specialist}
+\item[Hypothesis] Four classes (Zoom\_video, GoogleMeet\_video, Zoom\_voice, Discord\_video)
+were identified as weak, and the residual confusions among five classes
+(GoogleMeet voice/video, Discord voice/video, Messenger\_video) are genuine
+two-way ties with a sample-dependent partner. An additive log-probability offset
+on the weak classes, plus a specialist model for tied cases, should recover them.
+Zoom\_video is the class sacrificed, so leaving its offset unconstrained should be
+harmful.
+\item[Method] Within five outer folds, offsets for the four weak classes were tuned by
+coordinate ascent on the tuning rows only (coarse grid $-1.5$ to $1.5$ in 31 steps,
+then a $\pm0.15$ fine grid, up to 10 passes). A specialist LightGBM trained only on
+the five confusable classes replaced the prediction whenever the top-1 and top-2
+classes were both confusable and the probability margin was below
+$\tau\in\{0,0.05,\dots,0.25\}$; $\tau$ and the specialist were fitted in an inner
+four-fold loop. Final constants are medians across outer folds. The Zoom\_video
+offset was also capped at $\geq-0.10$ and compared with unrestricted optimisation.
+\item[Result] Macro-recall 0.8286 $\rightarrow$ 0.8379 (nested). Final offsets:
+Zoom\_video $-0.10$, GoogleMeet\_video $+0.20$, Zoom\_voice $+0.12$,
+Discord\_video $+0.38$; $\tau=0.05$. Uncapped Zoom\_video offset: 0.8358; capped:
+0.8379.
+\item[Inference] A gain of 0.0093 over the corrected ensemble, obtained by shifting the
+decision boundary toward recall (the precision cost is measured in Experiment~8).
+Unconstrained optimisation pushes Zoom\_video further down for a worse net result.
+% TODO: add the confusion matrix that identified the 4 weak / 5 confusable classes, and offsets-only vs specialist-only arms
+\item[Verdict] Kept as the stand-alone Branch~A configuration, with the cap.
+\end{explog}
+
+\begin{explog}{8}{F1 view of Branch A}
+\item[Hypothesis] Recall-oriented offsets improve macro-recall at some cost in precision;
+macro-F1, the scored metric, will show where.
+\item[Method] Macro-, micro- and weighted-F1 and per-class recall and F1 on the nested
+predictions of Experiment~7.
+\item[Result] Macro-F1 0.8033, micro-F1 0.8078, weighted-F1 0.8131, against macro-recall
+0.8379. Zoom\_voice recall 0.800 but F1 0.549; GoogleMeet\_voice recall 0.950, F1
+0.724; Zoom\_video recall 0.552, F1 0.691; WhatsApp\_voice recall 0.988, F1 0.975.
+\item[Inference] Zoom\_voice precision is about 0.42: the offsets buy recall with false
+positives, so the macro-recall figure overstates the criterion actually scored.
+\item[Verdict] The branch is reported on both metrics; its outputs enter the blend as
+corrected probabilities \emph{without} the offsets or the specialist
+(Experiment~25).
+\end{explog}
+
+\begin{explog}{9}{Single-thread determinism}
+\item[Hypothesis] Parallel fitting should not change which hyperparameter pair the inner search
+selects.
+\item[Method] Estimators were run with \texttt{n\_jobs=-1} and \texttt{n\_jobs=1}; the
+selected (temperature, margin-threshold) pair and the final score were compared.
+\item[Result] Parallel execution introduced floating-point non-determinism that shifted
+the selected pair and moved the final score by up to about 0.01.
+\item[Inference] Differences of this size are as large as several of the gains reported in
+this section.
+\item[Verdict] All estimators run with \texttt{n\_jobs=1}.
+\end{explog}
+
+\subsection{Branch B: tabular in-context learning}
+
+ 
+\begin{explog}{10}{TabICL against the tree control}
+\item[Hypothesis] A pretrained in-context tabular classifier is competitive on 1{,}285 rows
+without a hyperparameter search.
+\item[Method] TabICL at default settings on the full 241 columns, top-120 and top-60,
+against the LightGBM control of Experiment~3; paired McNemar test~\cite{mcnemar}.
+TabPFN~v2~\cite{tabpfn} could not be run initially because its weights require
+licence acceptance through an interactive login; it was later run on the published
+checkpoint.
+\item[Result] Full width 0.8389 grouped (plain 0.8195, macro-F1 0.8232, 83\,s); top-120
+0.8280 (0.8117); top-60 0.8272 (0.8117); LightGBM control 0.8249 (0.8069). Against
+the control TabICL wins 66 rows and loses 49 ($p=0.135$). TabPFN~v2: 0.8311
+(top-120), 0.8230 (full), 0.8191 (top-60), degrading with width.
+\item[Inference] All three TabICL widths exceed the best of 2{,}377 searched points with
+three arms and no tuning, but the paired difference is not established at this
+sample size. TabICL is also the best foundation model tried.
+\item[Verdict] Adopted as the second branch on the strength of the point estimate and
+its consistency across widths.
+\end{explog}
+
+\begin{explog}{11}{TabICL parameters and seed bagging}
+\item[Hypothesis] The internal ensemble size, the softmax temperature and bagging over seeds
+can add accuracy cheaply.
+\item[Method] Eighteen arms over \texttt{n\_estimators}, \texttt{softmax\_temperature}
+and bag count, full repeat budget.
+\item[Result] \texttt{n\_estimators}=16: 0.8405 grouped (macro-F1 0.8268), $+0.0016$ over
+the default 8 against a noise floor of 0.0031; 32: 0.8358. The softmax temperature
+(0.75/0.90/1.05) gives identical accuracy to four decimals. Five seed bags of 8
+estimators: 0.8350 (sd 0.0016) against 0.8389 unbagged (sd 0.0031).
+\item[Inference] The internal ensemble has an interior optimum; temperature cancels out of the
+argmax under logit averaging and acts as a calibration parameter only; bagging
+halves the variance but smooths toward a slightly worse consensus because the model
+already ensembles internally.
+\item[Verdict] None of the three changes is established on accuracy grounds; the
+runs that feed the blend nevertheless use 16 estimators.
+\end{explog}
+
+\subsection{Routes that did not help}
+
+ 
+\begin{explog}{12}{Auxiliary corpus: pretraining, probe features and direct transfer}
+\item[Hypothesis] A small transformer over the five packets, pretrained on a larger public
+capture corpus that contains all five applications, transfers representations that
+the trees cannot learn from 1{,}285 rows; frozen-encoder probes add information
+absent from the engineered features; and a classifier trained purely on the corpus
+recognises the application on competition flows if the two corpora are
+commensurable.
+\item[Method] The corpus (MIRAGE-AppAct-2024~\cite{mirage}, 6.97\,GB, 20 applications) was reduced to
+payload lengths, gaps and direction for the first 20 packets: 14{,}975 UDP flows,
+or 90{,}610 flows with TCP included (the larger set was adopted, with a transport
+flag). \emph{Pretraining:} PacketFormer tokenises each packet (eight continuous
+descriptors, a 24-bin size embedding, positional embedding, \texttt{[CLS]}); 3
+pre-norm layers, 4 heads, $d_\mathrm{model}=96$; 8{,}000 steps, batch 256, 347\,s on
+one GPU; masked-packet modelling, a contrastive objective over two traffic-plausible
+augmentations, a domain-adversarial head against unlabelled competition flows and
+random truncation to 5/8/12/20 packets. No competition label was used.
+\emph{Probes:} 46 probe columns (application family, a video-likeness proxy,
+bitrate and pacing with residuals, a transport fingerprint, PCA components) appended
+to the full feature set; matched runs with the block on and off, for LightGBM,
+XGBoost, RandomForest and TabICL at 8, 16 and 32 estimators. \emph{Transfer:} a
+gradient-boosted model trained on 7{,}655 UDP media flows of the five applications
+was applied to the competition training set, with lengths as stored and with 28
+bytes of IP+UDP header added; the corpus metadata was inspected for an activity
+label.
+\item[Result] Pretraining: from scratch 0.7331 grouped accuracy (macro-F1 0.7239),
+pretrained 0.7346 (0.7262), a gain of 0.0015; final pretraining losses: total
+2.664, masked-bin 1.146, masked-gap 0.959, contrastive 2.074, domain 0.016. Probes
+(grouped accuracy): LightGBM 0.8144 $\rightarrow$ 0.8144, XGBoost 0.8082
+$\rightarrow$ 0.7996, RandomForest 0.7778 $\rightarrow$ 0.7782; TabICL with probes
+0.8257 / 0.8288 / 0.8300 against 0.8389 (8) and 0.8405 (16) without, best arm
+against best arm $-0.0105$; the transport-fingerprint probe had a degenerate target
+and emitted no features. Transfer: application accuracy 0.3183 and 0.2988
+respectively, against 0.3844 for the majority class; the published archive carries
+only the package name and byte/packet counters, so no activity manifest exists.
+\item[Inference] Five tokens give attention little to work with and 1{,}285 labels give
+fine-tuning little to learn from. The probe block is neutral-to-harmful for three
+model families and marginal for a fourth. Transfer falls below the majority
+baseline: the domain gap at the level of packet sizes is total, which also explains
+the null probe result.
+\item[Verdict] Auxiliary-data route closed. PacketFormer kept only as a diversity member
+of the model pool; probe block retired.
+\end{explog}
+
+\begin{explog}{13}{Exact and tolerance-based length-tuple lookup}
+\item[Hypothesis] Because the label is almost determined by the length tuple (Experiment~1), a
+lookup table over training tuples can override the model on rows it matches.
+\item[Method] Coverage and purity of tuple matches at exact, $\pm1$, $\pm2$ and $\pm4$
+byte tolerance (gate: more than 5\% coverage at more than 0.95 accuracy), followed
+by the differential that decides the question: model accuracy against lookup
+accuracy on the covered rows.
+\item[Result] Exact matching covers 7.6\% of test rows (5.5\% of CV rows) at 0.972 accuracy
+and passes the gate. On the 71 covered CV rows the model is already at 1.0000
+against the lookup's 0.9718; overall accuracy with the override changes by
+$-0.0016$. At $\pm4$ bytes: 232 rows, model 0.9181, lookup 0.8922, change
+$-0.0047$.
+\item[Inference] The model is already perfect on every exactly matched row; a lookup can only
+take rows from a model that answers them correctly. The near-determinism seen in
+Experiment~1 is a property of unique tuples, not of exploitable structure.
+\item[Verdict] Dropped.
+\end{explog}
+
+\begin{explog}{14}{Calibration and decision-layer adjustments}
+\item[Hypothesis] Confidence can be repaired without moving accuracy; a per-class logit bias,
+or deferring low-margin rows, lifts accuracy, particularly inside the Zoom pair.
+\item[Method] Temperature~\cite{guo}, vector and Dirichlet~\cite{kull} calibration on the
+grouped out-of-fold predictions of the best LightGBM point; the selection rule was
+amended mid-round to the best negative log-likelihood among calibrators within one
+point of raw accuracy, because the first rule selected Dirichlet and silently gave
+up accuracy. Nested logit-bias fits on raw and on calibrated probabilities, and
+margin-based deferral at 0.10 and 0.35.
+\item[Result] Raw: accuracy 0.8210, NLL 0.7931, ECE 0.1012, mean confidence when wrong
+0.7833. Temperature: 0.8210, 0.5628, 0.0451, 0.6095. Vector: accuracy 0.8031, NLL
+0.5898, ECE 0.0359. Dirichlet: 0.8101, 0.5450, 0.0349. Decision layer: raw argmax
+0.8210 (Zoom-pair accuracy 0.6548); bias on raw 0.8226 (5 rows changed); bias on
+calibrated 0.8187 (18 rows); deferral 0.8202 at 0.10 and 0.8117 at 0.35. The fitted
+bias vector is small (max $|b|=0.10$) and does not push toward Zoom\_video.
+\item[Inference] Temperature scaling cuts NLL by 29\% and ECE by 55\% at no accuracy cost; the
+richer calibrators buy slightly more calibration for 1--2 accuracy points. The best
+decision-layer arm moves five rows for $+0.0016$, inside the noise floor; a global
+per-class prior shift cannot recover the Zoom-pair gap, because buying Zoom rows
+costs rows elsewhere.
+\item[Verdict] Temperature scaling kept; decision-layer adjustments dropped.
+\end{explog}
+
+\begin{explog}{15}{Recovering call structure from the flows}
+\item[Hypothesis] If flows from one call can be grouped, aggregating predictions within a group
+should resolve ambiguous flows from their siblings.
+\item[Method] A same-call scorer, clustering of its output, and aggregation of per-flow
+predictions within clusters by log-probability sum or confidence-weighted vote,
+plus an oracle run using the pseudo-groups as if they were true calls.
+\item[Result] Same-call ROC-AUC 0.998 on held-out groups; cluster application purity 0.997,
+label purity 0.989, adjusted Rand index 0.775 against the pseudo-groups; 1{,}024 of
+1{,}107 clusters are singletons, the largest holds 13 flows. Aggregation: 0.8327
+(log-probability sum, $-0.0054$) and 0.8304 (weighted vote, $-0.0078$) against
+0.8381; oracle grouping 0.8311 ($-0.0070$).
+\item[Inference] Call structure is easy to recover and worthless: even with perfect knowledge
+of which flows share a call, aggregation lowers accuracy, because siblings are rare
+and where they exist they already agree with the model.
+\item[Verdict] Branch closed on a measured ceiling.
+\end{explog}
+
+\begin{explog}{16}{Combining models inside Branch B, and selecting the Branch B model}
+\item[Hypothesis] Combining diverse learners beats the best single model; a weighted
+combination of TabICL and a tree model, or a larger pool, beats the pre-specified
+TabICL pair.
+\item[Method] Hill-climbed soft-vote weights (also scored nested: fitted on four fifths of
+the out-of-fold rows, scored on the fifth), stacking with a logistic meta-learner
+(inner CV) and rank averaging, in two rounds: the gradient-boosted pool, then the
+pool with TabICL. Then 17 candidate blends over TabICL and the five other families
+on the same grouped folds with and without the Zoom rule, with paired bootstrap and
+McNemar comparisons against the earlier standing model (TabICL, flat view only).
+The pre-specified pair (flat and hierarchical views averaged) was kept as the
+default, because the best-scoring blend is the maximum of seventeen candidates
+scored on the same 1{,}285 rows.
+\item[Result] Round one: best single LightGBM 0.8210; nested hill-climb 0.8195; stacking
+0.8187; rank averaging 0.7735; the fitted hill-climb score 0.8319 is 1.2 points
+above its nested score. Round two: single TabICL 0.8381; stacking 0.8327; nested
+hill-climb (TabICL $\times$0.75, LightGBM $\times$0.25) 0.8311; fitted 0.8451; rank
+averaging 0.7837. Candidate blends, accuracy / macro-F1 without the rule, and
+macro-F1 with it: TabICL $\times$2 + LightGBM (flat+hier) 0.8381 / 0.8216, 0.8319;
+\textbf{TabICL flat+hier average 0.8358 / 0.8201, 0.8292}; TabICL flat only 0.8381
+/ 0.8262, 0.8274; TabICL + LightGBM + XGBoost 0.8342 / 0.8147, 0.8231; all six
+families 0.8272 / 0.8082, 0.8172. Shipped against standing: $+0.0030$ macro-F1,
+interval $[-0.0130,+0.0201]$, $P(\Delta>0)=0.630$, McNemar 46/51 ($p=0.685$);
+observed maximum against standing: $+0.0058$, $[-0.0114,+0.0231]$, 0.744, 53/54
+($p=1.000$).
+% TODO: the flat-only TabICL row (0.8381/0.8262) differs from Exp. 10/11 (0.8389/0.8232, 0.8405/0.8268); add one line saying these are different rounds/seeds
+\item[Inference] At 1{,}285 rows a fitted blend weight is a memorised weight: only nested
+estimates are admissible for choosing. Neither paired difference in model
+selection is established; the durable result of the round is the diagnosis of which
+flows are unwinnable (Experiment~18), not the choice among near-equal blends.
+\item[Verdict] TabICL flat and hierarchical views averaged, with the Zoom rule (grouped
+accuracy 0.8342, macro-F1 0.8292), is Branch~B.
+\end{explog}
+
+\subsection{Error geometry and the Zoom rule}
+
+ 
+\begin{explog}{17}{Where the errors are}
+\item[Hypothesis] The residual errors concentrate in a small number of identifiable confusions
+rather than being spread evenly.
+\item[Method] Three-repeat grouped CV of the standing gradient-boosted configuration;
+errors split by label dimension and by packet-size regime (whether all five packets
+lie in the audio band, below 300 bytes).
+\item[Result] Accuracy 0.8156, macro-F1 0.7982, 237 errors. Application accuracy 0.9035;
+mode accuracy 0.8934 (0.9027 given the application is right). Audio-only windows:
+726 flows (56.5\%) at 0.7590 with 175 errors; windows with a larger packet: 559
+flows at 0.8891 with 62 errors. Zoom\_voice against Zoom\_video alone accounts for
+68 of the 237 errors; Zoom\_voice recall is 0.34.
+\item[Inference] Errors concentrate in audio-only windows and in one pair.
+\item[Verdict] Redirected the work from model search to the Zoom pair.
+\end{explog}
+
+\begin{explog}{18}{Separability of voice and video inside the audio-only window, and the score ceiling}
+\item[Hypothesis] A video call whose first five packets are all audio-sized produces a record
+indistinguishable from a voice-call record; whether the pair is separable depends on
+the application.
+\item[Method] Per application, over flows whose window is audio-only, grouped-CV AUC of
+video against voice (gradient boosting over all 241 features); threshold sweep of
+the audio band from 200 to 500 bytes; upper bounds on accuracy and macro-F1 assuming
+every other flow is classified perfectly.
+\item[Result] Table~\ref{tab:t3-ambig}. For Zoom the subset is exactly balanced (80 voice,
+80 video) and the AUC of 0.551 is not distinguishable from a coin flip at $n=160$.
+Every threshold from 250 to 500 bytes isolates the same 80/80 subset (75/76 at 200
+bytes). Upper bounds: accuracy 0.9377 (80 of 1{,}285 flows unwinnable) and macro-F1
+0.9364, reached by sending the whole subset to Zoom\_voice (Zoom\_voice F1 0.667,
+Zoom\_video F1 0.697). A macro-F1 of 0.90 would need the other eight classes to
+average F1 $\geq0.954$; they average 0.868.
+\item[Inference] The Zoom pair is information-limited by the five-packet window, not by the
+model; the 300-byte boundary is a property of the data, not of a tuned constant. This
+is the Task~3 counterpart of Task~1's perfect-rescorer ceiling (Exp.~A15): the headline metric cannot go past 0.9364, so the remaining
+distance is in the other classes.
+\item[Verdict] A macro-F1 of 0.90 is not attainable on this dataset; the quantity of
+interest becomes how much of the structural maximum is captured.
+\end{explog}
+
+\begin{table}[t]
+\caption{Audio-only windows by application (Experiment~18). The four applications
+shown account for 646 of the 726 audio-only flows.}
+% TODO: add the WhatsApp row (the remaining 80 flows) once confirmed from the logs
+\label{tab:t3-ambig}
+\centering
+\begin{tabular}{lccc}
+\hline
+Application & Audio-only flows & of which video & Grouped AUC (video vs voice) \\
+\hline
+Discord & 290 & 52 & 0.880 \\
+Google Meet & 85 & 45 & 0.826 \\
+Messenger & 111 & 19 & 0.879 \\
+Zoom & 160 & 80 & 0.551 \\
+\hline
+\end{tabular}
+\end{table}
+ 
+\begin{explog}{19}{Derivation and measurement of the Zoom rule}
+\item[Hypothesis] On an evenly split, inseparable subset every assignment has the same accuracy
+but not the same macro-F1; sending the whole subset to the smaller class recovers its
+recall at no cost to the larger one.
+\item[Method] Derivation: with all other flows correct, sending the 160 audio-only Zoom
+flows to Zoom\_voice gives F1 0.667 (voice) and 0.697 (video; recall $92/172$),
+summing to 1.364, whereas sending them to Zoom\_video gives 0 and 0.811, summing to
+0.811. Rule: if a flow is predicted to be Zoom (either class) and all five packets
+are below 300 bytes, label it Zoom\_voice. The rule has no fitted parameter: its
+direction follows from the 80/80 balance and the class sizes, and its threshold is
+the audio band already defined from the protocol analysis. Out-of-fold evaluation on
+the flat, hierarchical and averaged views of the round-three base learner;
+% TODO: name the base learner used for these numbers
+bootstrap over 2{,}000 resamples of the averaged model.
+\item[Result] Macro-F1 0.7942 $\rightarrow$ 0.8080 (flat), 0.7978 $\rightarrow$ 0.8092
+(hierarchical), 0.8041 $\rightarrow$ 0.8181 (average). Bootstrap gain on the
+average: $+0.0140$, 95\% interval $[0.000,+0.028]$, $P(\mathrm{gain}>0)=0.975$;
+accuracy 0.8233 $\rightarrow$ 0.8241; Zoom\_voice F1 0.384 $\rightarrow$ 0.580.
+\item[Inference] The gain comes from Zoom\_voice recall, with accuracy essentially unchanged, as
+the derivation predicts. The bootstrap interval touches zero at its lower end. The
+rule was derived for macro-F1; on accuracy it is neutral (0.8233 $\rightarrow$
+0.8241), so it should not be expected to move an accuracy-type score.
+\item[Verdict] Kept as a deterministic post-processing step.
+\end{explog}
+
+\begin{explog}{20}{Does the rule hold across model families?}
+\item[Hypothesis] A rule derived from a class-balance measurement, not fitted, should help every
+hypothesis class.
+\item[Method] Six base learners, each in three views (flat ten-class, hierarchical,
+fifteen-class mixture in which video is split by window type), grouped folds, with
+and without the rule.
+\item[Result] Table~\ref{tab:t3-rule}: all six families improve, in every view. For TabICL the matched flat+hierarchical average goes from 0.8201 to 0.8292 ($+0.0091$); the $+0.0030$ implied by the table's best-view columns understates it. % TODO: recompute all six rows with the same view in both columns
+\item[Inference] The rule reflects the data rather than the estimator.
+\item[Verdict] Kept.
+\end{explog}
+
+\begin{table}[t]
+\caption{Macro-F1 per family without and with the Zoom rule (Experiment~20); each
+column reports the best of the three views, chosen separately per column, so the
+two columns are not a matched-view comparison.}
+\label{tab:t3-rule}
+\centering
+\begin{tabular}{lcc}
+\hline
+Base learner & Without rule & With rule \\
+\hline
+TabICL & 0.8262 & 0.8292 \\
+LightGBM & 0.8066 & 0.8169 \\
+XGBoost & 0.7965 & 0.8044 \\
+ExtraTrees & 0.7815 & 0.7885 \\
+CatBoost & 0.7735 & 0.7804 \\
+RandomForest & 0.7640 & 0.7725 \\
+\hline
+\end{tabular}
+\end{table}
+ 
+\begin{explog}{21}{Fitted corrections against the derived rule}
+\item[Hypothesis] Hierarchical heads, a finer label view, balanced weights or a fitted decision
+layer add to the rule.
+\item[Method] Each change compared on grouped out-of-fold predictions; fitted parameters
+scored nested.
+\item[Result] Hierarchical application $\times$ mode heads: $+0.004$ macro-F1 alone and a
+useful second view. Fifteen-class mixture view: 0.8063 alone, above the flat view.
+Average of flat, hierarchical and mixture: 0.8085, 0.8185 with the rule. A single
+global mode head in place of per-application heads: AUC 0.9661 against 0.9680, no
+difference. Class-balanced sample weights in every head: flat $+0.005$, ensemble
+$-0.003$. Per-class log-probability bias fitted for macro-F1: in sample 0.8124,
+nested 0.7956 against 0.7982 raw. A single global mode-bias parameter: nested 0.8173
+against 0.8181 unbiased.
+\item[Inference] Both fitted decision-layer variants gain in sample and lose nested; at 1{,}285
+rows a fitted threshold is a memorised threshold, which is why the derived rule
+survives where fitted corrections do not.
+\item[Verdict] Hierarchical and mixture views kept as ensemble members; weights and
+fitted biases dropped.
+\end{explog}
+
+\subsection{Combining the two branches}
+
+ 
+\begin{explog}{22}{Paired out-of-fold diagnostics}
+\item[Hypothesis] The two branches, built on different features (31 against 241 columns) and
+different learner families, make partly different errors, so blending can help.
+\item[Method] Raw Branch~A probabilities (temperature $T=2$, prior-corrected) against the
+averaged Branch~B flat and hierarchical probabilities on the same 1{,}285 training
+rows.
+\item[Result] Macro-F1 / accuracy: Branch~A 0.7900 / 0.7961, Branch~B 0.8201 / 0.8358. The
+two agree on 84.98\% of rows; both are correct on 75.33\% and both wrong on 12.14\%;
+only Branch~A is correct on 4.28\% (55 rows) and only Branch~B on 8.25\% (106
+rows). Branch~A's 55 unique wins are led by Zoom\_voice (27), GoogleMeet\_voice (8)
+and GoogleMeet\_video (7); Branch~B's 106 by Discord\_video (30), Discord\_voice (28)
+and Zoom\_video (27). Zoom\_voice recall is 0.712 for Branch~A against 0.438 for
+Branch~B; Zoom\_video recall is 0.605 against 0.738.
+\item[Inference] The errors are partly decorrelated, and Branch~A's complementary strength is
+concentrated in Zoom\_voice, a minority class, which is consistent with the recall
+offsets of Experiment~7.
+\item[Verdict] Blending is worth testing; weight selection is done nested.
+\end{explog}
+
+\begin{explog}{23}{Blend weight: full-data sweep and nested grouped selection}
+\item[Hypothesis] A weighted average $w\,p_\mathrm{A}+(1-w)\,p_\mathrm{B}$ has an interior
+optimum, and if the weight is real, the one chosen on the training side of each
+grouped fold should be stable and its held-out score should hold.
+\item[Method] $w$ was swept from 0.00 to 1.00 in steps of 0.05 on all 1{,}285 rows, with
+and without the Zoom rule (reference only: weight and score share the same rows).
+Then, for each of the ten grouped folds, $w$ was chosen from the same grid using only
+that fold's training rows and applied unchanged to its held-out rows, under two
+selection objectives (macro-F1 without the rule, and macro-F1 after the rule).
+Held-out predictions are pooled over both repeats (each row scored twice).
+\item[Result] Full-data sweep: without the rule best $w=0.40$, macro-F1 0.8363 ($w=0$:
+0.8201; $w=0.5$: 0.8351; $w=1$: 0.7900); with the rule best $w=0.50$, 0.8380
+($w=0.40$: 0.8366; $w=0$: 0.8292; $w=1$: 0.7855). Nested selection:
+Table~\ref{tab:t3-nested}. The rule-free objective selects 0.45, 0.30, 0.40, 0.40,
+0.45, 0.40, 0.45, 0.40, 0.25, 0.45 (median 0.40); the rule-aware objective selects
+0.55, 0.25, 0.50, 0.55, 0.30, 0.55, 0.50, 0.40, 0.50, 0.50 (median 0.50).
+\item[Inference] The optimum is broad (0.40--0.50), the weight is stable across folds
+(0.25--0.55) and the held-out gain over Branch~B alone survives nesting. The
+full-data figures are optimistic and are used only to locate the region.
+\item[Verdict] Weight 0.40/0.60 adopted (the nested median under the rule-free objective
+and the full-data optimum of the sweep). The headline estimate is the per-fold mean
+of the nested blend with the rule, \textbf{0.8318}. This figure inherits the stratified-fold optimism of Branch~A's probabilities (Section~\ref{sec:t3-limits}).
+\end{explog}
+
+\begin{table}[t]
+\caption{Nested grouped selection of the blend weight (Experiment~23). Pooled: both
+repeats of every held-out row; fold mean: mean of the ten per-fold scores.}
+% TODO: confirm that the fold means 0.8286 / 0.8318 belong to the rule-free objective (as in the final script header)
+\label{tab:t3-nested}
+\centering
+\begin{tabular}{lcccc}
+\hline
+ & \multicolumn{2}{c}{Macro-F1 pooled} & \multicolumn{2}{c}{Macro-F1 fold mean} \\
+Configuration & no rule & + rule & no rule & + rule \\
+\hline
+Branch B alone (TabICL, flat+hier) & 0.8201 & 0.8292 & 0.8175 & 0.8268 \\
+Blend, nested weight, rule-free objective (median 0.40) & 0.8319 & 0.8345 & 0.8286 & \textbf{0.8318} \\
+Blend, nested weight, rule-aware objective (median 0.50) & 0.8307 & 0.8331 & --- & --- \\
+Blend, fixed $w=0.40$ (optimistic, same rows) & 0.8363 & 0.8366 & --- & --- \\
+\hline
+\end{tabular}
+\end{table}
+ 
+\begin{explog}{24}{The rule after the blend, and the blend against Branch B}
+\item[Hypothesis] The rule is orthogonal to which model produced the probabilities, so it
+should add to the blend as it does to Branch~B; and the blend improves on Branch~B as
+shipped (with the rule).
+\item[Method] Rule applied to the blend, to Branch~B and to Branch~A alone, same predictions
+otherwise. Paired bootstrap over rows (2{,}000 resamples, both repeats averaged) and
+McNemar's test on row correctness, shipped configuration ($w=0.40$ plus rule)
+against Branch~B plus rule and against raw Branch~B.
+\item[Result] Blend: 0.8363 $\rightarrow$ 0.8366 (fixed $w=0.40$) and 0.8319 $\rightarrow$
+0.8345 (nested), i.e.\ $+0.0003$ to $+0.0026$. Branch~B alone: 0.8201 $\rightarrow$
+0.8292 ($+0.0091$). Branch~A alone: 0.7900 $\rightarrow$ 0.7855 ($-0.0045$). Against
+Branch~B plus rule: $+0.0072$ macro-F1 (pooled 0.8366 against 0.8292; interval
+$[-0.0036,+0.0192]$, $P(\Delta>0)=0.888$); McNemar 16 rows won by the blend against
+10 for Branch~B, $p=0.327$. Against raw Branch~B: $+0.0164$ (interval
+$[-0.0007,+0.0330]$, $P(\Delta>0)=0.970$). With the nested weight estimate the gain
+over Branch~B plus rule is $+0.0039$ (pooled) and $+0.0050$ (per-fold mean).
+\item[Inference] The rule's value is largest where the model under-predicts Zoom\_voice;
+Branch~A already assigns Zoom\_voice at high recall, so most of the rule's effect is
+absorbed by the blend, and applied to Branch~A alone it costs Zoom\_video recall. The
+blend is better in every estimate, by roughly 0.4 to 0.7 macro-F1 points over
+Branch~B with the rule, but the interval includes zero; most of the improvement over
+\emph{raw} Branch~B is the Zoom rule plus Branch~A's Zoom\_voice recall.
+\item[Verdict] Blend and rule both retained (threshold 300 bytes, no fitted parameter);
+the marginal gain of each over the best single branch is reported as not established.
+\end{explog}
+
+\begin{explog}{25}{Final configuration and test-set output}
+\item[Hypothesis] The validated pipeline can be refit on all training rows and applied to the 327
+test flows without change.
+\item[Method] Branch~A (31 features; the three tree models; $T=2$; prior correction) was
+refit on all 1{,}285 rows, single-threaded; the per-class offsets and the specialist
+of Experiment~7 were \emph{not} carried into the blend, so that the blend receives
+corrected probabilities rather than outputs shifted toward recall. Branch~B flat and
+hierarchical test probabilities (16 estimators, full-data refit) were averaged, with
+the label order aligned to Branch~A's alphabetical order. Blend $0.4\,p_\mathrm{A}+0.6\,p_\mathrm{B}$,
+argmax, then the Zoom rule.
+\item[Result] The rule routed 43 of 327 test flows to Zoom\_voice, in line with the training
+proportion (an even 80/80 split in the ambiguous subset). Predicted class counts:
+Discord\_voice 67, Discord\_video 56, Zoom\_voice 43, Messenger\_video 33,
+Zoom\_video 27, GoogleMeet\_video 26, Messenger\_voice 23, WhatsApp\_video 22,
+WhatsApp\_voice 19, GoogleMeet\_voice 11 (these match the submitted file exactly).
+\item[Inference] The output proportions are plausible against the flows-per-call prior of
+Experiment~1.
+\item[Verdict] Submitted. Nested-CV estimate: macro-F1 0.8318.
+\end{explog}
+
+
+\subsection{Per-Class Results}
+
+Table~\ref{tab:t3-perclass} gives the per-class breakdown of the fixed-weight blend.
+
+\begin{table}[t]
+\caption{Per-class results of the fixed-weight configuration ($w=0.40$ plus Zoom
+rule; pooled, so the mean F1 is 0.8366, not the nested 0.8318) against Branch~B plus
+rule and raw Branch~A.}
+\label{tab:t3-perclass}
+\centering
+\begin{tabular}{lrcccc}
+\hline
+Class & $n$ & Precision & Recall & F1 & F1 B+rule / A raw \\
+\hline
+Discord\_video & 256 & 0.969 & 0.855 & 0.909 & 0.905 / 0.846 \\
+Discord\_voice & 238 & 0.837 & 0.903 & 0.869 & 0.864 / 0.826 \\
+GoogleMeet\_video & 112 & 0.814 & 0.741 & 0.776 & 0.765 / 0.737 \\
+GoogleMeet\_voice & 40 & 0.720 & 0.900 & 0.800 & 0.759 / 0.679 \\
+Messenger\_video & 131 & 0.929 & 0.893 & 0.911 & 0.914 / 0.867 \\
+Messenger\_voice & 94 & 0.907 & 0.936 & 0.921 & 0.906 / 0.873 \\
+WhatsApp\_video & 82 & 0.888 & 0.963 & 0.924 & 0.936 / 0.865 \\
+WhatsApp\_voice & 80 & 0.988 & 1.000 & 0.994 & 0.988 / 0.975 \\
+Zoom\_video & 172 & 0.978 & 0.512 & 0.672 & 0.672 / 0.703 \\
+Zoom\_voice & 80 & 0.437 & 0.912 & 0.591 & 0.583 / 0.530 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Limitations}
+\label{sec:t3-limits}
+ 
+\begin{itemize}
+\item \textbf{Mixed fold protocols.} Branch~A's out-of-fold probabilities were
+produced under stratified 5-fold cross-validation, whereas Branch~B's come from the
+grouped folds, so Branch~A's raw scores in Experiments~22--24 are likely somewhat
+optimistic relative to a grouped estimate. Correcting this would weaken Branch~A, so
+the selected weight of 0.40 on Branch~A is, if anything, too high, and the nested
+blend estimate of 0.8318 is likely somewhat optimistic.
+% TODO [RERUN]: recompute Branch A on the stored grouped folds and redo Tables 10 and 11
+\item \textbf{Same-row selection.} The Branch~B variant, the 16-estimator setting and
+the blend were all chosen among near-equal candidates on the same 1{,}285 rows; every
+paired difference in Experiments~16 and 24 lies within bootstrap noise.
+\item \textbf{Different tuned configurations.} Branch~A's tree settings were tuned
+for the 31-column set under its own protocol and differ from the Experiment~3 search
+winners, which were found on the 241-column set.
+\item \textbf{Row-level resampling.} Bootstrap intervals resample rows, not
+pseudo-groups, and are therefore slightly narrow.
+\item \textbf{Scope of the rule.} The Zoom rule is a property of this dataset's
+Zoom audio-only windows (Experiment~18); it is not claimed to transfer to other
+applications, where voice and video are separable (AUC 0.83--0.88).
+\item \textbf{External and unlabelled data.} Experiment~12 used a public capture
+corpus (MIRAGE-AppAct-2024) for pretraining and probes only; the final pipeline does
+not use it. Unlabelled test flows were used for adversarial validation and the
+domain-adversarial pretraining head, never for fitting a label-dependent quantity.
+\end{itemize}

@@ -1,0 +1,250 @@
+\section{Task 1: Dataset, Full Experimental Log and Bugs}
+\label{app:t1}
+\renewcommand{\expprefix}{A}
+
+\subsection{Dataset and Data Usage}
+
+Table~\ref{tab:t1-dataset} gives the full dataset statistics. The change-polarity
+labels (842 additions, 558 modifications, zero pure deletions) sum to 1{,}400 of the
+1{,}407 boxes.
+% TODO: explain the 7 boxes with no polarity label from the polarity script
+The unlabelled test templates were used as a source for synthetic training pairs
+(Experiment~5). No test-set labels exist to us, and no test photographs were used for
+threshold selection.
+% TODO: confirm that only templates, not test photographs, entered synthesis
+
+\begin{table}[h]
+\caption{Task 1 dataset statistics.}\label{tab:t1-dataset}
+\centering
+\small
+\begin{tabular}{lp{6.2cm}}
+\toprule
+Quantity & Value \\
+\midrule
+Train pairs / boxes & 200 / 1{,}407 \\
+Test pairs & 100 \\
+Dataset size & 2.5\,GB \\
+Boxes per image & 3--11, median 7 \\
+Median box size & $22\times22$\,px \\
+Boxes under $16\times16$\,px (both sides) & 419 \\
+Boxes exactly $8\times8$\,px & 83 \\
+Change polarity & 842 additions, 558 modifications, 0 deletions (7 boxes unlabelled) \\
+Alignment & no warp needed for 284/300 pairs, p95 residual $\leq0.26$\,px \\
+Photo degradation & 2--6$\times$ lower Laplacian variance than template; $\sim$18\% heavy shadow \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Development Path Summary}
+
+Table~\ref{tab:t1-path} summarises the steps from the first baseline to the pooled
+five-fold result (Section~\ref{sec:t1-experiments}).
+
+\begin{table}[h]
+\caption{Task~1 development path. Fold-0 out-of-fold F1 (268 boxes; one box
+$=0.004$ F1) unless marked as pooled over five folds (1{,}407 boxes).}
+\label{tab:t1-path}
+\centering
+\small
+\begin{tabular}{llcl}
+\toprule
+Step & Exp. & F1 & Note \\
+\midrule
+Classical normalised difference & A1 & 0.0293 & recall 0.572, precision 0.015 \\
+Siamese CenterNet, single model & A2 & 0.9049 & reference control \\
+\texttt{\_aug} weights, old $\rightarrow$ new decode & A6 & 0.9257 & same weights, $+0.021$ \\
+$+$\,\texttt{\_augsyn} detector (WBF ensemble) & A9 & 0.9266 & ceiling $0.944\rightarrow0.963$ \\
+$+$\,cross-fold verifier & A11 & 0.9430 & gain on all five folds \\
+Pooled, detector only & A13 & 0.9385 & nested threshold: 0.9385 \\
+Pooled, detector $+$ verifier & A12 & 0.9465 & nested threshold: 0.9435 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Organisation of the Log}
+
+Nineteen experiments were numbered in sequence; we group them by theme below. Experiments~6 and~7 are the same study and are reported together as Experiment~6 (the number~7 is unused); Experiment~19, an infrastructure failure with no effect on any result, is described in Appendix~\ref{app:t1-detach}. Within this appendix, ``Experiment~$n$'' refers to Experiment~A$n$. Unless noted, results are reported on fold~0 out-of-fold validation before the full 5-fold run (Experiment~12). Numbers in Experiments~6 and later were produced after the fusion bug of Experiment~16 was fixed; Experiments~3 and~4 were not repeated (see the limitations in Section~\ref{sec:t1-results}).
+
+\subsection{Baseline establishment}
+
+\begin{explog}{1}{Classical normalized-difference baseline}
+\item[Hypothesis] A naive pixel-wise difference between template and photo can localize content changes directly, since differences should stand out after alignment.
+\item[Method] Compute normalized pixel difference between aligned template and photo, threshold to get blobs, convert blobs to boxes.
+\item[Result] Recall 0.572 at precision 0.015. Global F1 $=0.0293$.
+\item[Inference] Fails catastrophically because every glyph edge fires --- the photo is systematically softer/blurrier than the template, so raw differencing cannot distinguish scan/print noise from genuine changes. Precision, not recall, is the hard part of this task. Blur-matching template to photo before differencing is a prerequisite, not an optimization.
+\item[Verdict] Rejected as a primary approach; directly informed the design of the Stage~0 ink-map preprocessing.
+\end{explog}
+
+
+\begin{explog}{2}{Siamese CenterNet, single model, fold 0 (reference baseline)}
+\item[Hypothesis] A shared-weight ConvNeXt-tiny Siamese encoder over 4-channel (BGR~+~ink) streams, decoded through a U-Net path to output stride~2 (instead of the standard stride~4), can localize the small (median $22\times22$, many $8\times8$) ground-truth boxes at sub-pixel precision.
+\item[Method] Train a Siamese CenterNet with four heads (centre heatmap, w/h, sub-pixel offset, auxiliary change mask) on $768$\,px tiles, 60\% sampled around annotated differences. Decode at \texttt{score\_thr}$=0.05$, \texttt{max\_boxes}$=40$, no TTA.
+\item[Result] Fold~0 OOF: F1 $=0.9049$, Precision $=0.922$, Recall $=0.888$ (TP 238 / FP 20 / FN 30 on 268 boxes).
+\item[Inference] Establishes that stride-2 small-object detection is viable and sets the control number (0.9049) that every subsequent change is measured against.
+\item[Verdict] Kept as the baseline architecture; became the reference for all fold-0 controlled experiments.
+\end{explog}
+
+
+\subsection{Detector-side ablations}
+
+\begin{explog}{3}{Size-relative width/height loss}
+\item[Hypothesis] Standard w/h regression loss is size-blind and should under-penalize errors on tiny ($8\times8$) boxes relative to large ones; a size-relative loss should improve small-box localization.
+\item[Method] Replace absolute w/h loss with a size-normalized variant; train on fold~0 with identical settings otherwise.
+\item[Result] Fold~0 finished at TP~238 / FP~20 / FN~30 --- exactly the reference's counts.
+\item[Inference] No measurable effect. One box is worth 0.004 F1 on 268 validation boxes, and we estimate run-to-run noise at about $\pm0.02$ F1. Identical TP/FP/FN counts to the reference are unusual at that noise level, so they may mean that the flag did not take effect or that the log was copied from the baseline run.
+\item[Verdict] Dropped; kept as an option, disabled by default.
+% TODO: (1) verify in the Exp.3 log that the size-relative loss flag was active and the counts are not copied from Exp.2;
+% TODO: (2) the +-0.02 noise estimate and the ``three runs in 0.890--0.905'' claim need a seeds table; add it or delete both.}
+\end{explog}
+
+
+\begin{explog}{4}{EMA weights (decay 0.999)}
+\item[Hypothesis] Exponential moving average of weights should stabilize training and yield a better final checkpoint than raw weights.
+\item[Method] Track an EMA of model weights during training; compare EMA versus raw weights at each checkpoint on fold~0 validation.
+\item[Result] EMA weights were never selected over raw weights until the final two epochs, where they tied.
+\item[Inference] No consistent benefit within the training budget used; on a short schedule EMA does not have time to average out enough noise to help.
+\item[Verdict] Neutral; dropped as default, kept behind a flag.
+\end{explog}
+
+
+\begin{explog}{5}{Synthetic small-mark pairs}
+\item[Hypothesis] The model under-detects sub-12\,px boxes because there are too few real examples; synthetically generating small-mark differences on real page layouts should raise coverage of that size band.
+\item[Method] Generate synthetic template/photo pairs with invented small-mark edits on real page layouts, fold-scoped to avoid leakage (Section~\ref{sec:t1-arch}). Train a model variant (\texttt{\_augsyn}) on real~+~synthetic data.
+\item[Result] Standalone F1 is \emph{worse} than the augmented-only model (0.896 vs.\ 0.926). But candidate recall ceiling (fraction of ground-truth boxes present anywhere in the candidate list at IoU~0.5) rose from 0.891 (\texttt{\_aug}, the matched control without synthetic data) to 0.922 on the sub-12\,px band specifically, and the overall ceiling rose from 0.9440 to 0.9590. (Comparing with the original model's 0.828 would also credit the dihedral augmentation, which \texttt{\_augsyn} shares with \texttt{\_aug}.)
+\item[Inference] This model looks like a failure on F1 alone because it proposes very aggressively (10{,}238 candidates vs.\ 421 for the original, though these counts come from different decode settings and are not like-for-like), but it recovers boxes no other model ever proposes.
+\item[Verdict] Kept, but only as an ensemble member, never standalone.
+% TODO: recount candidates for both models at one decode setting
+% TODO: Its value is in ensemble coverage, not standalone accuracy --- a fact that would have been missed without explicitly measuring the recall ceiling separately from F1.
+\end{explog}
+
+
+\subsection{Decode-time optimization and the model/decode entanglement}
+
+\begin{explog}{6}{Decode settings and the model/decode interaction}
+\item[Hypothesis] Flips and transposes are free label-preserving augmentation and should improve generalization; if it appears not to help, the measurement method (decode settings) should be suspected before the change itself. A low score threshold, a higher box cap and 8-view TTA should surface more true candidates, at the cost of noise that WBF and the verifier can filter.
+\item[Method] Train with dihedral augmentation (\texttt{\_aug}); evaluate the \emph{same weights} first at the old reference decode (\texttt{score\_thr}$=0.05$, \texttt{max\_boxes}$=40$, no TTA), then at \texttt{score\_thr}$=0.02$, \texttt{max\_boxes}$=300$ with 8-view TTA fused by WBF~\cite{solovyev2021wbf}. Sweep threshold, box cap and view count on fold-0 out-of-fold predictions.
+\item[Result] $0.9049$ at the old decode (looked worthless) versus $0.9257$ at the new decode: the same weights, $+0.021$ F1, about five boxes on 268.
+\item[Inference] Because the weights are identical, training-seed noise does not enter this comparison; the remaining uncertainty is the validation sample. A paired bootstrap over images would give an interval; we did not run it. Every earlier ``no gain'' verdict on augmentation had been measured through a lossy decoder, so comparing models at a fixed default decode compares decoders as much as models. This was the most consequential methodological correction in the project.
+\item[Verdict] Kept: augmentation is valuable but only visible once decode is fixed; \texttt{score\_thr}$=0.02$, \texttt{max\_boxes}$=300$, 8-view TTA with WBF became the standard decode.
+% TODO: add the sweep table (score_thr x max_boxes x views -> F1); the old Exp.7 gave no numbers
+% TODO: verify in the logs that 0.9049 here is a separate measurement and not the Exp.2 number reused}
+\end{explog}
+
+\subsection{Ensembling and recall-ceiling diagnostics}
+\begin{explog}{8}{Recall ceiling measurement across model variants}
+\item[Hypothesis] F1 alone cannot reveal whether a model's failures come from missing candidates (unrecoverable) or from mis-scored candidates (recoverable by rescoring); ceiling analysis will separate these.
+\item[Method] For each model/combination, compute the fraction of ground-truth boxes present anywhere in the candidate list at IoU~0.5, regardless of score, on fold~0 with TTA at score~0.02. Compare against the sub-12\,px ceiling specifically.
+\item[Result] Original: ceiling $0.9403$ (sub-12px $0.828$), F1 $0.9049$. \texttt{\_aug}: ceiling $0.9440$ ($0.891$), F1 $0.9257$. \texttt{\_augsyn}: ceiling $0.9590$ ($0.922$), F1 $0.8956$ (worse F1, much better ceiling). \texttt{\_aug}+\texttt{\_augsyn} combined: ceiling $0.9627$ ($0.9375$), F1 $0.9266$ (best two-model combo). A third model (\texttt{\_augpix}) is reported with ceiling $0.959$.
+\item[Inference] Nothing downstream can recover a box that was never proposed, so the ceiling bounds every rescoring idea. This measurement redirected the whole plan: the synthetic model's poor F1 was misleading, and the choice of two detector families was made before any expensive rescoring experiment was run.
+\item[Verdict] Kept as the standing diagnostic; drove the choice of exactly two detector families (\texttt{\_aug} + \texttt{\_augsyn}) per fold for the ensemble.
+% TODO: 0.9049 also appears in Exp.2 and Exp.6; check the Exp.8 log that this is a new measurement
+% TODO: define \_augpix (training recipe), and state what 0.959 is: the third model alone, or the three-model list. A union of candidate lists cannot fall below the two-model union ceiling of 0.9627, so if it is the combined list say how the lists were combined.
+% TODO: the claim that a third model ``diluted the agreement signal'' is not supported by a number here; add the F1 of the three-model combination or delete the claim.
+\end{explog}
+
+
+\begin{explog}{9}{Two-model ensemble (plain-augmented + synthetic-trained)}
+\item[Hypothesis] Combining the \texttt{\_aug} and \texttt{\_augsyn} detectors via WBF should capture both models' coverage while the verifier later separates true positives from the extra noise the synthetic model introduces.
+\item[Method] Fuse candidates from both detectors (each with its own TTA) via Weighted Boxes Fusion on fold~0.
+\item[Result] F1 $0.9257 \rightarrow 0.9266$ ($+0.001$), recall $+0.011$, ceiling $0.944 \rightarrow 0.963$.
+\item[Inference] A modest direct F1 gain but a large ceiling gain --- this sets up the verifier (Experiment~11) to do most of the real work, since the candidates it now needs to rescore contain far more of the true positives.
+\item[Verdict] Kept; became the standard ensemble configuration (2 detectors $\times$ 5 folds $=$ 10 detectors total).
+\end{explog}
+
+
+\subsection{Patch verifier}
+
+\begin{explog}{10}{Patch verifier, first attempt}
+\item[Hypothesis] A ResNet-18 verifier over $96\times96$ crops around each candidate box, producing a real-difference probability, should sharpen precision by rescoring detector output.
+\item[Method] Train the verifier on post-processed candidates: capped at 40 per image, already polarity-filtered.
+\item[Result] $+0.0009$ F1 --- effectively no gain.
+\item[Inference] The verifier was starved of negatives: because training candidates were already filtered and capped, it almost never saw a genuine false positive to learn from. This looked like a dead end, but the cause was the training-candidate distribution (already filtered and capped at 40 per image), not a flawed idea; Experiment~11 retrains on raw candidates.
+\item[Verdict] Initially written off; later revived after fixing the underlying data pipeline.
+\end{explog}
+
+
+\begin{explog}{11}{Patch verifier, retrained on generous raw candidates}
+\item[Hypothesis] If the verifier is trained on the full unfiltered candidate distribution (not the post-processed one), it should see enough real negatives to learn a useful precision boost, and should generalize if trained strictly cross-fold.
+\item[Method] Retrain the verifier per fold on $\sim$11{,}000 raw candidate records per fold at an 8:1 negative:positive ratio, generated only from candidates the verifier's own fold never trained the detector on.
+\item[Result] Fold-by-fold F1 delta: fold0 $+0.016$ ($0.9266\rightarrow0.9430$), fold1 $+0.014$, fold2 $+0.006$, fold3 $+0.006$, fold4 $+0.018$. Positive on all five folds independently.
+\item[Inference] The verifier is a genuine, consistent improvement once trained on properly distributed data --- the earlier null result (Experiment~10) came from training on filtered, capped candidates that contained almost no real negatives, not from a flaw in the approach. The sign is the same on five disjoint folds, which makes a chance effect unlikely, but each fold has about 40 images. The mean of the per-fold deltas ($+0.012$) is larger than the pooled delta ($+0.008$, from $0.9385$ to $0.9465$), and the mean of the per-fold F1 values ($0.9524$) is above the pooled F1 ($0.9465$).
+\item[Verdict] Kept; became Stage~2 of the final pipeline.
+% TODO: explain from the code (likely: per-fold thresholds vs one global threshold, and pooling weighting folds by box count)
+\end{explog}
+
+
+\subsection{Full pipeline, bias correction, and target reachability}
+
+\begin{explog}{12}{Full 5-fold training and pooled evaluation}
+\item[Hypothesis] The winning fold-0 recipe (dihedral-aug detector + synthetic-aug detector, 8-view TTA + WBF decode, cross-fold verifier) will generalize across all five folds, and the pooled global F1 (the competition's actual scoring method) will land close to the fold-0 number.
+\item[Method] Train the winning recipe on all five folds independently, decode all five with the frozen decode pipeline, apply per-fold verifiers, pool all 1{,}407 boxes across 200 pairs with one global threshold swept only on out-of-fold predictions.
+\item[Result] Pooled F1 $0.9465$, Precision $0.963$, Recall $0.930$ (TP~1{,}309 / FP~50 / FN~98). Per-fold F1: $0.943$, $0.955$, $0.935$, $0.961$, $0.968$; fold~2 is the lowest, and fold~0 (the one all early experiments were tuned on) is the second lowest and below the per-fold mean of $0.9524$.
+\item[Inference] The pooled out-of-fold F1 ($0.9465$) is higher than the fold-0 starting point ($0.9049$) mainly because of the ensemble, TTA and verifier added after Experiment~2. This is the number the submission's decode threshold (0.43) was derived from; the threshold transferred to the test set (6.68 predicted boxes per image against 7.04 in training).
+\item[Verdict] Kept as final architecture.
+\end{explog}
+
+
+\begin{explog}{13}{Nested cross-validation for threshold-selection bias}
+\item[Hypothesis] Sweeping the global decode threshold on the same out-of-fold predictions being reported may inflate the reported F1; a nested CV check (threshold chosen on four folds, applied to the fifth) will quantify this optimism.
+\item[Method] For each held-out fold, sweep the threshold on the other four folds only, then score the held-out fold with that threshold. Compare to the threshold tuned on the full pooled set.
+\item[Result] Detector only: tuned $0.9385$ vs.\ nested-honest $0.9385$ (0 optimism). With verifier: tuned $0.9465$ vs.\ nested-honest $0.9435$ ($+0.0030$ optimism).
+\item[Inference] Threshold-selection bias is small and quantified, not a major source of the headline number's optimism.
+\item[Verdict] Adopted $0.9435$ as the threshold-bias-corrected out-of-fold number. We now report three estimates in this order: official test score ($0.9577$), nested out-of-fold ($0.9435$), raw out-of-fold ($0.9465$).
+\end{explog}
+
+
+\begin{explog}{14}{Checkpoint-selection bias measurement}
+\item[Hypothesis] Saving the best-scoring epoch on a fold's own validation set and reporting that checkpoint's score on the same data is equivalent to taking the max of several noisy measurements, inflating the true generalization estimate.
+\item[Method] Compare each model's \texttt{best.pt} (highest validation epoch) score against its final-epoch (\texttt{last.pt}) score, across the \texttt{\_aug} and \texttt{\_augsyn} training recipes.
+\item[Result] \texttt{\_aug}: mean gap $+0.005$ (range $0.000$--$0.011$) --- curves flat at the end, so selection costs little. \texttt{\_augsyn}: mean gap $+0.034$ (range $0.020$--$0.058$) --- these models trained only 15 epochs and were still oscillating, so \texttt{best.pt} cherry-picks a lucky point.
+\item[Inference] The \texttt{\_augsyn} models carry meaningful checkpoint-selection bias because they were undertrained, not because the method is flawed; a longer schedule (e.g.\ 40 epochs) should close most of this gap. The official score ($0.9577$) is above both the raw out-of-fold F1 and the range we had derived from this analysis ($0.925$--$0.94$), so this analysis did not predict the test outcome; it measures a property of the out-of-fold estimate and is not a forecast of the test score.
+\item[Verdict] Reported as a measured bias of the out-of-fold estimate. The out-of-fold pass was not re-run with \texttt{last.pt}.
+\end{explog}
+
+
+\begin{explog}{15}{Recall ceiling and reachability analysis of the 0.97 target}
+\item[Hypothesis] Given the fixed candidate set, there is a hard upper bound on achievable F1 regardless of rescoring quality; this bound should be checked against the competition's 0.97 target before investing further in the verifier/scoring branch.
+\item[Method] Compute TP/FP/FN assuming a perfect rescorer (keep every true candidate, reject every false one) on the final candidate set.
+\item[Result] The candidate set contains 1{,}352 of 1{,}407 boxes at IoU~0.5 $\rightarrow$ ceiling F1 $=0.9801$ (TP~1{,}352, FP~0, FN~55), even for a flawless rescorer.
+\item[Inference] $0.97$ is below the ceiling ($0.9801$), so the target is not mathematically excluded. But even if every one of the 1{,}352 proposals that match a true box were kept, reaching $0.97$ would need at most about 28 false positives (the out-of-fold pipeline has 50), and the achieved $0.9465$ is $0.0336$ below the ceiling. Most of the remaining gap to $0.97$ would have to come from better scoring of a candidate set that already contains the 1{,}352 true boxes, with almost no false positives left, which is practically out of reach. The 55 boxes no model proposes at all are the real frontier; the sub-12\,px band that used to hold most misses is now at $0.944$ coverage, so that lever is largely spent. Further gains require better candidate proposals (a second backbone, a properly trained \texttt{\_augsyn}, direct inspection of the 55 missed boxes), not better verifiers.
+\item[Verdict] Target judged practically out of reach with these proposals; a roadmap for the next phase was defined but not executed.
+\end{explog}
+
+% TODO: the ``sub-12px coverage 0.944'' above equals the _aug overall ceiling in Exp.8; check it is the final-set number
+
+\subsection{Silent implementation bugs}
+\label{sec:t1-bugs}
+
+Three bugs were found during development. The first two corrupted fused scores and made working ideas (TTA, ensembling) look like failures until they were fixed; the third slowed verifier training and made a retrain expensive to attempt.
+
+\begin{explog}{16}{WBF score saturation}
+\item[Discovery] An 8-view TTA run scored F1~$0.775$ at precision~$0.67$, worse than no TTA.
+\item[Cause] Fused confidence was computed as $\mathrm{sum(scores)}/\min(\mathrm{members}{+}1,3)$. With 8 views a real box collects about 16 agreeing members, so the sum divided by 3 clipped to 1.0, while a box proposed by a single view kept its raw score; confidence was effectively inverted. The single-view path never saturated the denominator, so the bug appeared only once TTA or ensembling raised member counts. It invalidates every TTA comparison made before the fix. The numbers in Experiments~6 and later were produced after the fix; Experiments~3 and~4 predate it and were not repeated.
+\item[Fix] Fixed by an agreement-scaled mean; the single-view path was verified bit-for-bit identical to the archived pre-fix number.
+\end{explog}
+
+
+\begin{explog}{17}{Ensemble double-counted its sources}
+\item[Discovery] Pooling ensemble members collapsed recall to $0.056$, which was easy to notice.
+\item[Cause] Individual models already fuse their own TTA views internally, so defining $n_{\mathrm{sources}} = \mathrm{models}\times\mathrm{views}$ over-divided every score by roughly $16\times$.
+\item[Fix] Fixed by correcting the source-count accounting in the fusion step.
+\end{explog}
+
+
+\begin{explog}{18}{Verifier data-loading inefficiency}
+\item[Discovery] The first verifier epochs took about 60 minutes with the GPU idle.
+\item[Cause] The loader re-decoded four full-page PNGs per sample on every cache miss and shuffled across 160 pages, which meant about 140{,}000 PNG decodes per epoch. This affected throughput, not F1; it is not the cause of the null result in Experiment~10 (starved negatives), but it made the retrain of Experiment~11 expensive to attempt.
+\item[Fix] Fixed by cutting crops once into memory upfront, which brought epoch time down to seconds.
+\end{explog}
+
+
+
+\subsection{Infrastructure Failure during Fold Training}
+\label{app:t1-detach}
+
+A five-way parallel fold-training job on Modal died mid-run after a local network
+interruption. The fan-out (\texttt{starmap}) was driven by the client, so
+\texttt{SIGTERM} reached the whole process group and killed all five folds even though
+\texttt{-{}-detach} was set. Detach flags do not protect a client-orchestrated fan-out;
+we moved the fan-out into a remote function so that it survives local disconnects.
+This incident affected throughput only and no reported number.

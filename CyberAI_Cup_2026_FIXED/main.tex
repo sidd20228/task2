@@ -1,0 +1,225 @@
+\documentclass[runningheads]{llncs}
+%
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage[varvw]{newtxmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{tabularx}
+\usepackage{wrapfig}
+% ---- experiment-log entries (appendices) ----
+% One block per experiment: a bold heading, then one line per field with an
+% upright bold label and a hanging indent.
+\newcommand{\expprefix}{}
+\newenvironment{explog}[2]{%
+  \par\addvspace{0.7\baselineskip}%
+  \noindent\textbf{Experiment~\expprefix#1: #2}\par\nopagebreak[4]%
+  \begin{description}[leftmargin=5.4em,labelwidth=4.9em,labelsep=0.5em,
+      align=left,font=\normalfont\small\bfseries,
+      topsep=2pt,itemsep=1pt,parsep=0pt,partopsep=0pt]}
+  {\end{description}}
+% compact stage lists for the architecture descriptions
+\newenvironment{stages}
+  {\begin{description}[leftmargin=0pt,font=\normalfont\bfseries,
+      topsep=3pt,itemsep=2pt,parsep=0pt]}
+  {\end{description}}
+
+
+\begin{document}
+
+\title{CyberAI Cup 2026: Final Architectures, Experimental Logs, and Critical Findings for Packaging Difference Mining, Compliance Auditing, and Flow Classification}
+
+\titlerunning{CyberAI Cup 2026 - AICS Workshop - ICONIP 2026}
+\authorrunning{S. Parashar et al.}
+\author{
+Siddhant Parashar\inst{1}\textsuperscript{*}
+\and Piyush Kumar\inst{1}\textsuperscript{*}
+\and Mayank Kumar\inst{1}\textsuperscript{*}
+\and Manvi Bansal\inst{1}\textsuperscript{*}
+\and Mahek Vedant\inst{1}\textsuperscript{*}
+\and Ritika Soni\inst{1}\textsuperscript{*}
+\and Krish Chauhan\inst{1}\textsuperscript{*}
+\and Arsh Abbas Naqvi\inst{1}
+\and Arnabi Dutta\inst{1}
+\and Mayank Jangid\inst{1}
+\and Anil Singh Parihar\inst{1}
+}
+
+
+\institute{
+Ethical Hacking and CyberSecurity Lab, Delhi Technological University\\
+\email{ehaxdce@gmail.com}
+}
+
+\maketitle
+\begingroup
+\renewcommand{\thefootnote}{*}
+\footnotetext{Co-first authors}
+\endgroup
+
+%
+\begin{abstract}
+The CyberAI Cup 2026 comprised three independent tasks: packaging difference
+mining, document-grounded compliance auditing, and real-time communication (RTC)
+flow classification. This paper describes our solution to each.
+For packaging difference mining, we use a Siamese ConvNeXt-Tiny CenterNet that
+decodes at stride~2 to resolve marks as small as $8\times8$\,px, trained with
+fold-scoped synthetic small-mark pairs and combined with 8-view test-time
+augmentation, Weighted Boxes Fusion and a cross-fold ResNet-18 patch verifier.
+It achieves \textbf{0.9577} F1, and a recall-ceiling analysis shows that its
+out-of-fold candidate set supports up to 0.9801.
+For compliance auditing, we map each of 41 checking points to its governing
+sections of the Export Control Rules, condensing a 184-section policy into 18
+sections, and audit all nine evidence documents of an establishment in a single
+full-context Gemini~3.5~Flash call. This reaches \textbf{0.7818} accuracy, and
+full-context reasoning outperformed hybrid retrieval (BM25, dense retrieval and
+ColBERT reranking) at lower token cost.
+For RTC flow classification from only five packets, we blend gradient-boosted
+trees with the tabular foundation model TabICL and add a parameter-free decision
+rule derived from a separability analysis of audio-only Zoom windows, reaching
+\textbf{0.8746} accuracy.
+Our solutions achieved an overall score of 0.8714, the mean of the three task
+scores, ranking first of 16 teams. We also report the evaluation protocol behind
+every estimate, together with the negative results and implementation bugs that
+shaped each design.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+The CyberAI Cup 2026 posed three unrelated machine-learning problems: finding small
+content differences between packaging designs and photographs of the printed product
+(Task~1), deciding statutory compliance from several heterogeneous documents with an
+LLM (Task~2), and classifying real-time communication flows from five-packet traces
+(Task~3). Table~\ref{tab:official} gives our official results.
+
+The approach was the same in every track: build a controlled baseline, locate where
+it fails before changing the model, and measure what the competition metric does not
+show (recall ceilings in Task~1, per-class and per-element accuracy in Task~2, and an
+upper bound set by one inseparable class pair in Task~3). Several conclusions changed
+once we examined the complete pipeline, most visibly in Task~1, where two fusion bugs
+made test-time augmentation and ensembling look worse than no fusion.
+
+Our contributions are: (i)~three complete systems with official results; (ii)~for
+each task, a record of which estimate came from which protocol (out-of-fold, nested,
+development set, official); (iii)~negative results and implementation bugs, including
+the effect of each on earlier conclusions; and (iv)~the limitations that remain, with
+the experiments we did not run.
+
+Sections~\ref{sec:task1}--\ref{sec:task3} describe, for each task, the problem, the
+submitted system, the development path that led to it, and the results.
+Section~\ref{sec:discussion} draws the lessons common to the three tracks.
+Appendices~\ref{app:t1}--\ref{app:t3} contain the full experimental logs, extended
+tables and per-task limitations; Exp.~A$n$, B$n$ and C$n$ denote experiment $n$ of
+Task~1, 2 and~3.
+
+\begin{table}
+\caption{Official test results (team 1665, rank 1 of 16, overall 0.871353, the mean of the three accuracy values) next to our own estimates.}\label{tab:official}
+\centering
+\small\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccc>{\raggedright\arraybackslash}p{4.3cm}}
+\toprule
+Task & Acc. & Prec. & Rec. & F$_\beta$ & Our estimate \\
+\midrule
+1 & 0.9577 & 0.9656 & 0.9499 & 0.9577 & pooled OOF F1 0.9465; nested 0.9435 \\
+2 & 0.7818 & 0.7758 & 0.7818 & 0.7783 & dev accuracy 0.861 (10 cases) \\
+3 & 0.8746 & 0.9211 & 0.8746 & 0.883 & CV accuracy 0.8389; macro-F1 0.8318 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\input{task1.tex}
+\input{task2.tex}
+\input{task3.tex}
+\input{discussion.tex}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+Officially, Task~1 scored \textbf{0.9577} (out-of-fold 0.9465; candidate-set ceiling
+0.9801), Task~2 scored \textbf{0.7818} with a single full-context LLM call (development
+estimate 0.861), and Task~3 scored \textbf{0.8746} accuracy with gradient-boosted
+trees, TabICL and a deterministic rule (pooled grouped out-of-fold accuracy 0.8389). The common
+lessons were to separate model quality from decoding and scoring effects, to measure
+what the headline metric hides, and to suspect the experiment before the idea when a
+result is unexpectedly negative.
+
+\begin{credits}
+
+\subsubsection{Compute}
+Task~1 detectors and verifiers were trained on A100 GPUs on Modal.
+
+\subsubsection{Use of large language models}
+Gemini~3.5~Flash is the reasoning component of the Task~2 system. Claude Sonnet~5 was used in the Task~2 development bake-off and per-checking-point analysis (Exps.~B4, B9, B10) but not in the submitted system. Claude was used to restructure and copy-edit this manuscript; the authors checked all content.
+
+\subsubsection{\ackname}
+We thank the CyberAI Cup 2026 organisers for providing the datasets and evaluation infrastructure used in this work.
+
+\subsubsection{\discintname}
+The authors have no competing interests to declare that are relevant to the content of this article.
+
+\end{credits}
+
+\begin{thebibliography}{21}
+
+\bibitem{zhou2019centernet}
+Zhou, X., Wang, D., Kr{\"a}henb{\"u}hl, P.: Objects as points. arXiv preprint arXiv:1904.07850 (2019)
+
+\bibitem{liu2022convnext}
+Liu, Z., Mao, H., Wu, C.-Y., Feichtenhofer, C., Darrell, T., Xie, S.: A ConvNet for the 2020s. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 11976--11986 (2022)
+
+\bibitem{he2016resnet}
+He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pp. 770--778 (2016)
+
+\bibitem{ronneberger2015unet}
+Ronneberger, O., Fischer, P., Brox, T.: U-Net: convolutional networks for biomedical image segmentation. In: MICCAI 2015, LNCS, vol.~9351, pp. 234--241. Springer, Cham (2015)
+
+\bibitem{solovyev2021wbf}
+Solovyev, R., Wang, W., Gabruseva, T.: Weighted boxes fusion: ensembling boxes from different object detection models. Image and Vision Computing \textbf{107}, 104117 (2021)
+
+\bibitem{breiman2001rf}
+Breiman, L.: Random forests. Machine Learning \textbf{45}(1), 5--32 (2001)
+
+\bibitem{chen2016xgboost}
+Chen, T., Guestrin, C.: XGBoost: a scalable tree boosting system. In: Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 785--794 (2016)
+
+\bibitem{ke2017lightgbm}
+Ke, G., Meng, Q., Finley, T., Wang, T., Chen, W., Ma, W., Ye, Q., Liu, T.-Y.: LightGBM: a highly efficient gradient boosting decision tree. In: Advances in Neural Information Processing Systems 30 (NeurIPS), pp. 3146--3154 (2017)
+
+\bibitem{qu2025tabicl}
+Qu, J., Holzm{\"u}ller, D., Varoquaux, G., Le Morvan, M.: TabICL: a tabular foundation model for in-context learning on large data. In: Proceedings of the 42nd International Conference on Machine Learning (ICML). PMLR (2025)
+
+\bibitem{robertson2009bm25}
+Robertson, S., Zaragoza, H.: The probabilistic relevance framework: BM25 and beyond. Foundations and Trends in Information Retrieval \textbf{3}(4), 333--389 (2009)
+
+\bibitem{lewis2020rag}
+Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., K{\"u}ttler, H., Lewis, M., Yih, W.-t., Rockt{\"a}schel, T., Riedel, S., Kiela, D.: Retrieval-augmented generation for knowledge-intensive NLP tasks. In: Advances in Neural Information Processing Systems 33 (NeurIPS), pp. 9459--9474 (2020)
+
+\bibitem{khattab2020colbert}
+Khattab, O., Zaharia, M.: ColBERT: efficient and effective passage search via contextualized late interaction over BERT. In: Proceedings of the 43rd International ACM SIGIR Conference on Research and Development in Information Retrieval, pp. 39--48 (2020)
+
+\bibitem{xiao2024bge}
+Xiao, S., Liu, Z., Zhang, P., Muennighoff, N., Lian, D., Nie, J.-Y.: C-Pack: packed resources for general Chinese embeddings. In: Proceedings of the 47th International ACM SIGIR Conference on Research and Development in Information Retrieval, pp. 641--649 (2024)
+
+\bibitem{geminiteam2023}
+Google DeepMind: Gemini~3.5~Flash model card. Accessed via the alias \texttt{google/gemini-3.5-flash}, August 2026
+
+\bibitem{optuna} Akiba, T., Sano, S., Yanase, T., Ohta, T., Koyama, M.: Optuna: a next-generation hyperparameter optimization framework. In: Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 2623--2631 (2019)
+\bibitem{catboost} Prokhorenkova, L., Gusev, G., Vorobev, A., Dorogush, A.V., Gulin, A.: CatBoost: unbiased boosting with categorical features. In: NeurIPS 31 (2018)
+\bibitem{mcnemar} McNemar, Q.: Note on the sampling error of the difference between correlated proportions or percentages. Psychometrika 12(2), 153--157 (1947)
+\bibitem{tabpfn} Hollmann, N., et al.: Accurate predictions on small data with a tabular foundation model. Nature 637, 319--326 (2025)
+\bibitem{guo} Guo, C., Pleiss, G., Sun, Y., Weinberger, K.Q.: On calibration of modern neural networks. In: Proceedings of the 34th International Conference on Machine Learning (ICML), pp. 1321--1330 (2017)
+\bibitem{kull} Kull, M., et al.: Beyond temperature scaling: obtaining well-calibrated multiclass probabilities with Dirichlet calibration. In: NeurIPS 32 (2019)
+\bibitem{mirage} Guarino, I., et al.:MIRAGE-App$\times$Act-2024: A novel dataset for mobile app and activity traffic analysis. In: WiMob 2024 (2024)
+\end{thebibliography}
+
+\clearpage
+\appendix
+\input{appendix_task1.tex}
+\input{appendix_task2.tex}
+\input{appendix_task3.tex}
+
+\end{document}
