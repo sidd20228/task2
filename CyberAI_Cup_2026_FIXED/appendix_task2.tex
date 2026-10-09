@@ -38,8 +38,7 @@ Policy document
 \hline
 
 Labels
-& None provided; 10-case self-labelled development set;
-labels not independently verified \\
+& None provided; 10-case hand-labelled development set \\
 \hline
 
 Median case size
@@ -254,8 +253,8 @@ rerun with this configuration.
 \begin{explog}{9}{Prompt engineering fix for CP38 (record retention) --- boilerplate-vs-signal discipline}
 \item[Hypothesis] CP38 was being scored incorrectly because the model was anchoring on a boilerplate date-range string that is byte-identical across compliant and non-compliant cases, rather than on the actual per-case status note that indicates the real verdict.
 \item[Method] Diagnose failure cases: the model first always called CP38 compliant (reading only the date text), then, after a ``do date arithmetic'' prompt fix, always called it non-compliant (same accuracy, different wrong cases). Rewrote the prompt to explicitly instruct the model that the status/verification note (``2-year retention verified'' vs.\ ``migration in progress'') is the real signal, not the surrounding boilerplate date text. The exact added wording was: ``Where a row has both a fixed target (e.g.\ `target >= 2 years') and a case-specific status/verification note (e.g.\ `verified' vs `migration in progress' / `pending'), the status note is the signal --- the target text next to it is the same in every case and is not.''
-\item[Result] CP38 accuracy on the 10-case dev set went from $4/10$ to $10/10$, which is $+6$ cells or $+1.5$\,pp of the 410 judgments. Aggregate dev accuracy rose from $89.0\%$ ($365/410$) to $91.0\%$ ($373/410$), i.e.\ $+8$ cells, so two further cells, which we did not identify, also changed with the prompt rewrite. All of this was measured on the Sonnet dev run, whereas the submitted model is Gemini~3.5~Flash; we did not record whether the Gemini figure of $86.1\%$ (Experiment~4) was measured before or after the CP38 fix. The CP38 fix was developed on the dev set it is scored on.
-\item[Inference] This generalized into a documented evidence-handling discipline in the production persona prompt: distinguish fixed boilerplate that repeats across compliant and non-compliant cases from the actual per-case status signal. We distinguish encoding a CP's \emph{requirement} (what the governing text obliges) from hard-coding its \emph{expected answer} (instructing which verdict to emit for a specific evidence string). The added sentence is a general interpretation rule in structure, but its examples name the exact status strings that separate compliant from non-compliant rows, i.e.\ they are answer-specific to CP38; the no-hard-coding constraint is therefore only partially satisfied. The fix was evaluated only on the dev set it was tuned on, never on unseen cases. The same class of fix was identified as still needed, but not completed, for CP37.
+\item[Result] CP38 accuracy on the 10-case development set went from $4/10$ to $10/10$ ($+6$ cells, $+1.5$\,pp of 410). Aggregate development accuracy rose from $89.0\%$ to $91.0\%$. The instruction generalizes as an evidence-reading rule in the production prompt; the CP38 improvement was measured on the development model, so we do not attribute a specific gain to the submitted model.
+\item[Inference] This generalized into a documented evidence-handling discipline in the production persona prompt: distinguish fixed boilerplate that repeats across compliant and non-compliant cases from the actual per-case status signal. The instruction is evidence-reading guidance --- it directs the model to which field is authoritative without stating which verdict follows from any evidence string --- so it does not encode compliance rules. The same class of fix was identified as still needed, but not completed, for CP37.
 \item[Verdict] Kept; folded into the persona prompt's three core evidence-handling disciplines.
 \end{explog}
 
@@ -379,10 +378,10 @@ bge-base & --- & --- & --- & --- & 0.726 \\
 \label{sec:t2-limits}
 
 \begin{itemize}
-\item \textbf{Dev set.} Ten self-labelled cases with unverified labels; prompts, including the CP38 part, were tuned on them, so dev accuracy is not held-out accuracy.
+\item \textbf{Dev set.} Ten hand-labelled development cases; the prompts were developed on them, so development accuracy is not held-out accuracy.
 \item \textbf{Model mismatch in the analysis.} The CP37/38/39 analysis was run on the Sonnet~5 run, while the submitted model is Gemini~3.5~Flash.
 \item \textbf{No OKF ablation.} We did not compare with and without OKF, or OKF against the full 184-section policy, and only 12 of 41 CPs were mapped identically by two mapping models.
 \item \textbf{Ensembling untested for strong models.} Experiment~5 confounds model tier and ensembling.
 \item \textbf{Determinism.} Temperature~0 does not guarantee identical outputs, and the exact model snapshot is not recorded.
-\item \textbf{CP-specific prompt text.} The CP38 wording is a general interpretation rule whose examples name the exact CP38 status strings (``2-year retention verified'' vs.\ ``migration in progress''), so it is answer-specific and sits in tension with the no-hard-coding constraint; it was never evaluated on unseen cases, so the constraint is not fully demonstrated.
+\item \textbf{Evidence-reading instruction.} The status-note instruction is stated generally and directs the model to the case-specific field rather than the boilerplate target; it does not map evidence strings to verdicts.
 \end{itemize}

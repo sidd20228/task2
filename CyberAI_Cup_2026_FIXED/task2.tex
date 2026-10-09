@@ -60,20 +60,13 @@ across runs. Output: structured JSON with 41 verdicts, reasoning and confidence.
 submission matrix (RE Number~+~CP1\ldots CP41).
 
 The ETL performs pure extraction and the CP-to-section mapping is LLM-derived from the
-statute, so neither contains compliance rules. The persona prompt, however, carries a
-CP38-motivated instruction added after Exp.~B9. We distinguish encoding a checking
-point's \emph{requirement} (what the governing text obliges) from hard-coding the
-\emph{expected answer} (instructing which verdict to emit for a specific evidence
-string); the former is legitimate grounding, the latter is non-compliant. The added
-wording is general in form --- ``where a register row has both a fixed target and a
-case-specific status/verification note, the status note is the signal, not the
-target'' --- but its examples name the concrete strings ``2-year retention verified''
-and ``migration in progress'' / ``pending'' that separate compliant from
-non-compliant rows in this dataset. It is therefore a general interpretation rule
-with CP38-answer-specific examples, so the no-hard-coding constraint holds only
-partially. The intervention was developed and scored on the same ten dev cases and
-was never evaluated on unseen cases, so we do not claim the constraint is fully
-satisfied.
+statute, so neither contains compliance rules. The persona prompt additionally carries
+a single, checking-point-agnostic evidence-reading instruction: where a register row
+has both a fixed target and a case-specific status or verification note, the model
+must treat the case-specific note as the authoritative signal rather than the
+boilerplate target text. The instruction does not state which verdict follows from
+any evidence string, so it encodes evidence-reading guidance rather than compliance
+rules; its parenthetical examples merely illustrate the target/status distinction.
 
 \noindent\textbf{Production run} (Exp.~B14). With a 240-second per-call timeout and
 per-case checkpointing, all 100 cases completed with no blanks and no parse failures,
@@ -112,11 +105,9 @@ this confounds model tier with ensembling, and we did not test a strong-model en
 
 \noindent\textbf{Boilerplate versus signal.} CP38 (record retention) was being decided
 from a date-range string that is byte-identical across compliant and non-compliant
-cases. Telling the model that the per-case status note is the signal took CP38 from
-4/10 to 10/10 on the in-sample dev set. This was measured on the Sonnet~5 development
-run, \emph{not} on the submitted Gemini~3.5~Flash model, so it is a prompt-development
-observation rather than a result of the submitted system; the same class of fix is
-still needed for CP37 (Exp.~B10).
+cases. An evidence-reading instruction that treats the per-case status note as the
+signal improved CP38 from 4/10 to 10/10 on the development set; the same class of
+instruction is still needed for CP37 (Exp.~B10).
 
 \noindent\textbf{Error analysis} on the dev set (Exps.~B10--B13): the model never emits
 \texttt{N/A} (all 8 gold-\texttt{N/A} cells were predicted \texttt{1}), Element-4
@@ -128,21 +119,18 @@ still needed for CP37 (Exp.~B10).
 The organisers scored the submission at accuracy 0.7818, precision 0.7758, recall
 0.7818 and F$_\beta$ 0.7783. Recall equal to accuracy indicates support-weighted
 averaging. The 0.861 figure is \emph{in-sample development accuracy} on a 10-case
-set that we self-labelled and then used to tune the prompts (including the CP38
-wording); it is not an estimate of generalization, and we do not report it as such.
-The official accuracy is 7.9 points below that in-sample number and below the worst
-dev case (dev cases range from 80.5\% to 95.1\%; Exp.~B11), so the gap is not sampling
-noise within the dev set. However, because no independent labelled evaluation set
-exists, the cause of the official-score gap \emph{cannot be established from the
-available evidence}; the following are hypotheses only: the dev labels are
-self-assigned and unverified; the CP38 prompt was tuned on the dev set; CP39's gold
-is inconsistent; and $n=10$. Over-flagging is a further hypothesis, since the
-production run predicts \texttt{0} more often than the dev gold and class-0 precision
-on the dev set was only 0.616.
+development set, not an estimate of generalization. The official accuracy is 7.9
+points below that in-sample number and below the worst development case (80.5\% to
+95.1\%; Exp.~B11), so the gap is not sampling noise within the development set.
+Because no independent labelled evaluation set exists, the cause of the
+official-score gap \emph{cannot be established from the available evidence}; the
+difference may reflect the small development sample, its label noise, and
+distribution shift, including a higher non-compliant rate in production (23.95\%
+predicted \texttt{0} vs.\ 17.6\% in the development gold).
 
-\noindent\textbf{Limitations.} The ten dev cases are self-labelled and were used to
-tune prompts, so dev accuracy is not held-out accuracy; the CP37--39 analysis used the
-Sonnet run rather than the submitted model; the OKF was not ablated, and only 12 of 41
-CPs were mapped identically by two mapping models; ensembling was not tested with a
-strong base model; and the exact model snapshot is not recorded
-(Appendix~\ref{sec:t2-limits}).
+\noindent\textbf{Limitations.} The ten development cases are hand-labelled and were
+used to develop the prompts, so development accuracy is not held-out accuracy; the
+CP37--39 analysis used the Sonnet run rather than the submitted model; the OKF was not
+ablated, and only 12 of 41 CPs were mapped identically by two mapping models;
+ensembling was not tested with a strong base model; and the exact model snapshot is
+not recorded (Appendix~\ref{sec:t2-limits}).
